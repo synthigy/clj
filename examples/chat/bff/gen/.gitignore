@@ -1,0 +1,5 @@
+# Generated code — produced by `bb gen` from ../synthigy/*.xsql against a
+# running backend (see bb.edn `gen` task). Not tracked: run codegen yourself
+# to get the full example experience. Commit the .xsql inputs, not this output.
+*
+!.gitignore

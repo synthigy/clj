@@ -1,0 +1,14 @@
+{
+  "name": "@synthigy/sdk-cljs-build",
+  "version": "0.1.0",
+  "description": "Build tooling for the browser (ClojureScript) build of the Synthigy Clojure SDK. The SDK is consumed via Clojure deps — this package only exists to pull the shadow-cljs CLI.",
+  "private": true,
+  "scripts": {
+    "test": "npx shadow-cljs compile test && node out/test.js",
+    "test:watch": "npx shadow-cljs watch test"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "shadow-cljs": "^2.28.21"
+  }
+}

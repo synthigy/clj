@@ -1,0 +1,22 @@
+{:deps {:aliases [:dev]}
+ :nrepl {:port 7200}
+
+ :builds
+ {:test
+  {:target :node-test
+   :output-to "out/test.js"
+   :ns-regexp "-test$"}
+
+  ;; Throwaway harness — real-browser verification of the CLJS SDK's watch/mux
+  ;; port, NOT a shipped example. See examples/browser-demo/src/demo/core.cljs.
+  :browser-demo
+  {:target :browser
+   :output-dir "examples/browser-demo/out"
+   :modules {:main {:init-fn demo.core/init}}}
+
+  ;; Throwaway harness — real-browser verification of :wire-format :transit.
+  ;; See examples/browser-demo/src/demo/transit_check.cljs.
+  :browser-demo-transit
+  {:target :browser
+   :output-dir "examples/browser-demo/out-transit"
+   :modules {:main {:init-fn demo.transit-check/init}}}}}

@@ -1,0 +1,43 @@
+# Clojure build / caches
+target/
+.cpcache/
+.nrepl-port
+.nrepl-history
+.rebel_readline_history
+.lein-*
+.clj-kondo/.cache/
+.lsp/.cache/
+
+# Build artifacts
+*.jar
+pom.xml
+pom.xml.asc
+
+# Babashka
+.bb.edn.cache
+
+# ClojureScript / shadow-cljs (browser client build)
+.shadow-cljs/
+node_modules/
+out/
+out-transit/
+cljs-runtime/
+
+# Secrets — NEVER commit
+.env
+.env.local
+*.pem
+*.key
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+*.iml
+.vscode/
+.calva/
+*.swp
+
+# Agent scratch
+.claude/
+CLAUDE.md
