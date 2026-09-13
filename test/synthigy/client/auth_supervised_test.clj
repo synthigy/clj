@@ -47,9 +47,17 @@
   (doto w (.write (str s "\n")) .flush))
 
 (defn- read-result!
-  "Read+parse the child's one EDN result line off stderr."
+  "Read the child's EDN result line off stderr, skipping anything bb itself
+   prints there first (warnings, blank lines). EOF without a result surfaces
+   the whole stderr so the failure says what the child actually did."
   [proc]
-  (edn/read-string (.readLine (err-reader proc))))
+  (let [r (err-reader proc)]
+    (loop [noise []]
+      (let [line (.readLine r)]
+        (cond
+          (nil? line) {:ok false :error "child exited without a result" :stderr noise}
+          (.startsWith (.trim ^String line) "{") (edn/read-string line)
+          :else (recur (conj noise line)))))))
 
 
 (def ^:private child-ask-once
