@@ -5,6 +5,17 @@ All notable changes to `com.synthigy/sdk` (Clojars). Follows
 
 ## 0.1.1
 
+### Changed
+- **The platform audience is now the default; nobody configures it.** A
+  `client_credentials` mint naming no audience resolves to the identity-only
+  OIDC audience, which `/data`, `/schema`, `/history`, `/logs` and
+  subscriptions all reject — so every user had to set `SYNTHIGY_AUDIENCE` to a
+  constant they could not look up, since the server does not advertise it in
+  discovery. The failure was a bare 401 that said nothing about audiences.
+  This SDK is the client for the platform API, so that is what it now mints
+  for. Minting for a different API stays a per-call argument. The environment
+  variable remains as an escape hatch.
+
 ### Added
 - **`watch-sql-template`** — the ad-hoc twin of the `watch-<name>` a codegen'd
   `@watch` sql-template already emits. JavaScript and Python have had

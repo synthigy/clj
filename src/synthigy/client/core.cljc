@@ -9,6 +9,14 @@
    [synthigy.client.selection :as selection]
    [synthigy.client.auth :as auth]))
 
+(def platform-audience
+  "The platform API this SDK is a client of. `/data`, `/schema`, `/history`,
+   `/logs` and subscriptions all require a token bound to it. It names the API,
+   never a deployment, so it is the same string on localhost and in production
+   — which is why it is a constant rather than something every caller
+   configures. Minting a token for some OTHER API is a per-call argument."
+  "https://synthigy.com")
+
 (def ^:dynamic *client*
   "The connected client — set once via `synthigy.client/connect!`; every API
    fn uses it. Rebind with `binding` for a scoped alternate client (tests, a
@@ -110,7 +118,15 @@
                              :client-id client-id
                              :client-secret client-secret}
                       token-buffer (assoc :token-buffer token-buffer)
-                      audience (assoc :audience audience)))
+                      ;; Always bound: this SDK is the client for the platform
+                      ;; API, so that is what it mints for. Nothing for a caller
+                      ;; to configure, and nowhere to look the value up if there
+                      ;; were — the server does not advertise it in discovery.
+                      :always (assoc :audience
+                                     (or audience
+                                         #?(:clj (System/getenv "SYNTHIGY_AUDIENCE")
+                                            :cljs nil)
+                                         platform-audience))))
                    ;; The pipe beats the env var: exec injects the cached
                    ;; token AND supervises; only the pipe refreshes mid-run.
                    supervised? #?(:clj (auth/supervised) :cljs nil)
