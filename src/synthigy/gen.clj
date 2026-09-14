@@ -21,7 +21,7 @@
    exactly what changed."
   (:require [synthigy.client :as c]
             [synthigy.client.core :as score]
-            [clojure.data.json :as json]
+            [cheshire.core :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]))
 
@@ -290,7 +290,15 @@
   [{:keys [dir] :or {dir "synthigy"}}]
   (:operations (c/describe (read-source dir))))
 
-(defn- pull-schema!
+(def schema-pretty
+  "Cheshire printer tuned to `JSON.stringify(x, null, 2)` — byte-identical to
+   what the JS and Go generators write, so a polyglot repo keeps one artifact.
+   Cheshire's defaults differ: ` : ` between key and value, and inline arrays."
+  (assoc json/default-pretty-print-options
+         :indent-arrays? true
+         :object-field-value-separator ": "))
+
+(defn pull-schema!
   "GET /schema → `<dir>/schema.json`. Nothing at runtime reads this file; it is
    the snapshot XSQL editor tooling lints and completes against (`xsql-lint`,
    and the LSP when it lands) — see docs/plans/PLAN-XSQL-TOOLING.md. Same filename and
@@ -301,7 +309,7 @@
   (let [path   (io/file dir "schema.json")
         schema (c/schema)]
     (io/make-parents path)
-    (spit path (str (json/write-str schema :indent true) "\n"))
+    (spit path (str (json/generate-string schema {:pretty schema-pretty}) "\n"))
     (println "wrote" (str path) (str "(" (count (:entities schema)) " entities)"))
     path))
 

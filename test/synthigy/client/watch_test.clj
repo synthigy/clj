@@ -224,3 +224,26 @@
         (is (= ch (second (a/alts!! [ch (a/timeout 1000)])))
             "watch channel should be closed after disconnect!"))
       (is (empty? (:watches @(:mux fake))) "watches map cleared"))))
+
+(deftest watch-sql-template-requires-entities
+  (testing "a SQL template has no root entity, so the interest cannot be inferred"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"needs :entities"
+                          (client/watch-sql-template "SELECT count(*) AS n FROM {movie}" nil))))
+  (testing "an empty :entities is as unusable as none"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"needs :entities"
+                          (client/watch-sql-template "SELECT 1" nil :entities [])))))
+
+(deftest watch-sql-template-passes-entities-as-mux-interest
+  (testing "user-facing :entities becomes the :interest-entities live-value* reads"
+    (let [seen (atom nil)]
+      (with-redefs [client/watch-xsql (fn [op-map params opts]
+                                        (reset! seen [op-map params opts]) :handle)]
+        (is (= :handle (client/watch-sql-template "SELECT 1" {:a 1}
+                                                  :entities ["Movie" "UserRating"]
+                                                  :acting-as "u-1")))
+        (let [[op-map params opts] @seen]
+          (is (= {:op "sql-template" :source "SELECT 1"} op-map))
+          (is (= {:a 1} params))
+          (is (= ["Movie" "UserRating"] (:interest-entities opts)))
+          (is (= "u-1" (:acting-as opts)))
+          (is (nil? (:entities opts)) ":entities must not ride along under its old name"))))))

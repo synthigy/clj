@@ -704,13 +704,35 @@
   "Live result-set for a generated/compiled XSQL op map `{:op :source :entity}`
    — `watch-query` for codegen ops (`@watch` in the .xsql emits a `watch-<name>`
    fn that delegates here). Returns the same closeable atom; same options as
-   `watch-query`, plus `:entities` to override the interest entirely (used by
+   `watch-query`, plus `:interest-entities` to override the interest entirely (used by
    sql-template ops, whose `@watch` declares the entities to observe)."
   ([op-map params] (watch-xsql op-map params nil))
   ([op-map params opts]
    (let [run-opts (select-keys opts [:acting-as :key-format])
          run (fn [] (run-xsql op-map params run-opts))]
      (live-value* (:entity op-map) run opts))))
+
+(defn watch-sql-template
+  "Live, RLS-scoped result for a SQL template — the ad-hoc twin of the
+   `watch-<name>` a codegen'd `@watch` sql-template emits. Returns the same
+   closeable atom as `watch-query`.
+
+     (def stats (watch-sql-template \"SELECT count(*) AS n FROM {movie}\" nil
+                                    :entities [\"Movie\"]))
+     @stats                                         ; current rows
+     (close-watch! stats)                           ; stop
+
+   `:entities` is required: a template has no root entity, so there is nothing
+   to infer the multiplexer interest from. Otherwise takes `watch-query`'s
+   options."
+  [template params & {:keys [entities] :as opts}]
+  (when-not (seq entities)
+    (throw (ex-info "watch-sql-template needs :entities — a SQL template has no root entity to infer the watch interest from"
+                    {:template template})))
+  (watch-xsql {:op "sql-template" :source template} params
+              (-> opts
+                  (dissoc :entities)
+                  (assoc :interest-entities (vec entities)))))
 
 (defn close-watch!
   "Stop a handle from `watch`/`watch-schema` (a map with :close) or from

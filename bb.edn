@@ -1,3 +1,16 @@
 {:paths ["src"]
  :deps {org.babashka/http-client {:mvn/version "0.4.23"}
-        org.babashka/json {:mvn/version "0.1.6"}}}
+        org.babashka/json {:mvn/version "0.1.6"}}
+
+ ;; One command for both runtimes. `clojure -M:test` covers the JVM only, and
+ ;; the ClojureScript suite is a separate shadow-cljs build, so a green JVM run
+ ;; says nothing about the .cljs client.
+ :tasks {test-jvm  {:doc "JVM unit tests"
+                    :task (shell "clojure" "-M:test")}
+
+         test-cljs {:doc "ClojureScript unit tests (compiles, then runs on node)"
+                    :task (do (shell "npx" "shadow-cljs" "compile" "test")
+                              (shell "node" "out/test.js"))}
+
+         test      {:doc "Both suites"
+                    :depends [test-jvm test-cljs]}}}

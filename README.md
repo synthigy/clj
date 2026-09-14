@@ -36,7 +36,7 @@ Leiningen:
 ```
 
 Runtime deps are small and all Clojure-side: `babashka/http-client`,
-`babashka/json`, `org.clojure/data.json`, `org.clojure/core.async` and
+`babashka/json`, `cheshire`, `org.clojure/core.async` and
 `com.cognitect/transit-clj`. The ClojureScript build additionally pulls
 `promesa`, `cljs-bean` and `transit-cljs`; on the JVM those resolve to
 `.cljs` source jars that never load.
@@ -85,7 +85,7 @@ the raw wire keys, or `"camel"`.
 
 | Namespace | What | Use |
 |---|---|---|
-| `synthigy.client` | `connect!` + verbs: `search` `get` `sync` `stack` `delete` `batch`, XSQL `query`/`sql-template`, `watch-query`/`watch`/`close-watch!`, `history-*`, `schema`/`lint` | daily |
+| `synthigy.client` | `connect!` + verbs: `search` `get` `sync` `stack` `delete` `batch`, XSQL `query`/`sql-template`, `watch-query`/`watch`/`watch-sql-template`/`close-watch!`, `history-*`, `schema`/`lint` | daily |
 | *generated* (via `synthigy.gen`) | `(movie/list {...})` — typed ops from your `.xsql` | daily |
 | `synthigy.client.core` | `create-client`/`*client*` (binding), `op-*` builders for `batch`, `results->data`/`ok?`, `compose-tree` | data helpers |
 | `synthigy.client.subscriptions` | raw server subscription set | advanced — prefer watch |
@@ -103,8 +103,11 @@ generated code embeds each op's source string and ships no parser.
 
 ```bash
 clj -X:gen :dir '"synthigy"' :out '"src"' :ns-prefix myapp.ops
-# or from bb.edn:  bb gen
 ```
+
+Codegen runs under Babashka too — `bb gen` from a `bb.edn` task, same as on the
+JVM. The schema snapshot it writes is byte-identical to the JS and Go
+generators' output, so a polyglot repo keeps one artifact.
 
 ### Codegen authenticates as THE APP — not as you
 
@@ -379,7 +382,7 @@ per-call): `"kebab"`, `"camel"`, or `nil` for raw snake_case.
 
 `core/compose-forest` handles multiple independent roots.
 
-## Live data — watch & watch-query
+## Live data — watch, watch-query & watch-sql-template
 
 The recommended live layer. All watches on a client share **one** SSE stream
 and **one** consolidated server-side subscription (their interests are
@@ -428,6 +431,21 @@ subscription-set helpers live in **`synthigy.client.subscriptions`**
 **Do not mix them with watches on the same client**: the server keeps ONE
 full-replace subscription set per client identity, so raw calls clobber the
 multiplexer's set (and vice versa) — live updates silently stop.
+
+### Watching a SQL template
+
+A template has no root entity, so the entities to observe must be named:
+
+```clojure
+(def stats (synthigy/watch-sql-template
+             "SELECT count(*) AS n FROM {movie}" nil
+             :entities ["Movie"]))
+@stats
+(synthigy/close-watch! stats)
+```
+
+A codegen'd `@watch` sql-template emits an equivalent `watch-<name>` that
+carries the entities from the directive, so this is the hand-written route.
 
 ## Instrumentation
 
