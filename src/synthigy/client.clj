@@ -300,6 +300,16 @@
 ;; Model introspection
 ;; =======================================================================
 
+(defn deploy
+  "Deploy a dataset version from a modeler export, verbatim. Requires dataset:deploy."
+  [export-contents & {:as opts}]
+  (single-result (core/op-deploy export-contents) opts))
+
+(defn destroy
+  "Destroy a dataset (every version, table and row). Requires dataset:delete."
+  [dataset-xid & {:as opts}]
+  (single-result (core/op-destroy dataset-xid) opts))
+
 (defn deployed-model
   "Fetch the raw ERD model as deployed. Requires dataset:load scope."
   [& {:as opts}]

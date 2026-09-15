@@ -137,3 +137,24 @@
   (let [body (with-capture {:results [{:ok true :data []}]}
                #(client/search :user nil [:name] :acting-as "u-42"))]
     (is (= "u-42" (:acting_as body)))))
+
+;; ── deploy / destroy ─────────────────────────────────────────────────────
+
+(deftest deploy-posts-export-contents-verbatim
+  (let [body (with-capture {:results [{:ok true
+                                       :data {:deployed true :version "0.3"
+                                              :dataset "ds-1"}}]}
+               #(is (= {:deployed true :version "0.3" :dataset "ds-1"}
+                       (client/deploy "{\"~:xid\":\"v-1\"}"))))
+        op   (first (:operations body))]
+    (is (= "deploy" (:op op)))
+    (is (= "{\"~:xid\":\"v-1\"}" (:data op)))
+    (is (not (contains? op :entity)))))
+
+(deftest destroy-is-delete-on-dataset-by-xid
+  (let [body (with-capture {:results [{:ok true :data true}]}
+               #(is (true? (client/destroy "ds-1"))))
+        op   (first (:operations body))]
+    (is (= "delete" (:op op)))
+    (is (= "dataset" (:entity op)))
+    (is (= {:xid "ds-1"} (:data op)))))

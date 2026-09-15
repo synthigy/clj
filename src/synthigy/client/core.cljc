@@ -440,6 +440,16 @@
   {:op "get-tree" :entity (name entity) :root root :on (name on)
    :selections (selection/normalize selection)})
 
+(defn op-deploy
+  "Build a deploy operation — export-contents travels to the server verbatim."
+  [export-contents]
+  {:op "deploy" :data export-contents})
+
+(defn op-destroy
+  "Build a destroy operation: delete on the dataset meta-entity by xid."
+  [dataset-xid]
+  {:op "delete" :entity "dataset" :data {:xid dataset-xid}})
+
 (defn op-deployed-model
   "Build a deployed-model operation (raw ERD model as deployed)."
   [] {:op "deployed-model"})

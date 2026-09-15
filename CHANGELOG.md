@@ -3,6 +3,22 @@
 All notable changes to `com.synthigy/sdk` (Clojars). Follows
 [semver](https://semver.org). Pre-1.0: breaking changes can land on minor bumps.
 
+## 0.1.2
+
+### Added
+- **`deploy` and `destroy`** — `synthigy.client/deploy` takes a modeler
+  export's contents and `destroy` takes a dataset xid, with `op-deploy` /
+  `op-destroy` builders in `synthigy.client.core` for batch use. Both are in
+  the `.clj` and `.cljs` clients. A model export goes over the wire verbatim
+  as a string and the server decodes it, so no client needs a transit codec —
+  which matters least here, Clojure being the one SDK that HAS one, and most
+  as a contract: the SDK hands over bytes it never opens. `destroy` is
+  `delete` on the `dataset` meta-entity, and the deploy ack carries the
+  dataset xid it takes, so a caller holding nothing but the export can still
+  tear down what it deployed. Both are scope-gated server-side
+  (`dataset:deploy` / `dataset:delete`, which only the Dataset Developer role
+  carries), so the SDK adds no permission surface of its own.
+
 ## 0.1.1
 
 ### Changed
