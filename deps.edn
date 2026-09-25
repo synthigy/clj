@@ -37,9 +37,9 @@
   {:extra-paths ["test"]
    :extra-deps {io.github.cognitect-labs/test-runner
                 {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
-   :main-opts ["-m" "cognitect.test-runner" "-r" "synthigy.(client.(key|selection|compose|filter|subscriptions|watch|query|ops|verbs|auth-supervised)|gen)-test"]
+   :main-opts ["-m" "cognitect.test-runner" "-r" "synthigy.(client.(key|selection|compose|filter|subscriptions|watch|query|ops|verbs|auth-supervised|login|error)|gen)-test"]
    :exec-fn cognitect.test-runner.api/test
-   :exec-args {:patterns ["synthigy.(client.(key|selection|compose|filter|subscriptions|watch|query|ops|verbs|auth-supervised)|gen)-test"]}}
+   :exec-args {:patterns ["synthigy.(client.(key|selection|compose|filter|subscriptions|watch|query|ops|verbs|auth-supervised|login|error)|gen)-test"]}}
 
   :integration
   {:extra-paths ["test"]
@@ -48,6 +48,14 @@
    :main-opts ["-m" "cognitect.test-runner" "-n" "synthigy.client.integration-test"]
    :exec-fn cognitect.test-runner.api/test
    :exec-args {:nses [synthigy.client.integration-test]}}
+
+  :login-integration
+  {:extra-paths ["test"]
+   :extra-deps {io.github.cognitect-labs/test-runner
+                {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+   :main-opts ["-m" "cognitect.test-runner" "-n" "synthigy.client.login-integration-test"]
+   :exec-fn cognitect.test-runner.api/test
+   :exec-args {:nses [synthigy.client.login-integration-test]}}
 
   :onboard-integration
   {:extra-paths ["test"]

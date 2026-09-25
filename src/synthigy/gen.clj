@@ -8,7 +8,7 @@
    and sends it via synthigy.client. Connection is a BUILD-time dependency, like
    Prisma/sqlc/genqlient; commit the output and it runs offline forever after.
 
-     clj -X:gen :dir '\"synthigy\"' :out '\"src\"' \\
+     clj -X:gen :dir '\"xsql\"' :out '\"src\"' \\
                 :ns-prefix myapp.ops :endpoint '\"http://localhost:7887\"'
 
    Auth for the pull: THE APP'S OWN client credentials (:client-id/:client-secret
@@ -82,12 +82,33 @@
                       {:batch batch-name :member ref :candidates (mapv op-identity matches)}))
       :else (first matches))))
 
-(defn- read-source [dir]
-  (->> (.listFiles (io/file dir))
-       (filter #(and (.isFile ^java.io.File %) (str/ends-with? (.getName ^java.io.File %) ".xsql")))
-       (sort-by #(.getName ^java.io.File %))
-       (map slurp)
-       (str/join "\n\n")))
+(defn read-source
+  "Every .xsql under `dir` (recursive, sorted by relative path) merged into one
+   describe document; only the first file keeps its `@workspace`."
+  [dir]
+  (let [root (.toPath (io/file dir))]
+    (->> (file-seq (io/file dir))
+         (filter #(and (.isFile ^java.io.File %) (str/ends-with? (.getName ^java.io.File %) ".xsql")))
+         (map #(str/replace (str (.relativize root (.toPath ^java.io.File %))) java.io.File/separator "/"))
+         sort
+         (map-indexed (fn [i rel]
+                        (let [src (slurp (io/file dir rel))]
+                          (if (zero? i)
+                            src
+                            (->> (str/split src #"\n" -1)
+                                 (remove #(re-find #"^@workspace\b" %))
+                                 (str/join "\n"))))))
+         (str/join "\n\n"))))
+
+(defn read-files
+  "Every .xsql under `dir` as `[{:path :source}]` for describe, in `read-source` order."
+  [dir]
+  (let [root (.toPath (io/file dir))]
+    (->> (file-seq (io/file dir))
+         (filter #(and (.isFile ^java.io.File %) (str/ends-with? (.getName ^java.io.File %) ".xsql")))
+         (map #(str/replace (str (.relativize root (.toPath ^java.io.File %))) java.io.File/separator "/"))
+         sort
+         (mapv (fn [rel] {:path rel :source (slurp (io/file dir rel))})))))
 
 (defn- doc-for [op]
   (or (:description op)
@@ -274,7 +295,7 @@
   "The backend client for a pull, from opts + env. One identity for every call
    in a pull, so the IR and the schema snapshot describe the same principal."
   [{:keys [endpoint client-id client-secret token]}]
-  (let [endpoint (or endpoint (System/getenv "SYNTHIGY_ENDPOINT") "http://localhost:7887")
+  (let [endpoint (or endpoint (System/getenv "SYNTHIGY_ENDPOINT"))
         tok  (or token (System/getenv "SYNTHIGY_TOKEN"))
         cid  (or client-id (System/getenv "SYNTHIGY_CLIENT_ID"))
         csec (or client-secret (System/getenv "SYNTHIGY_CLIENT_SECRET"))]
@@ -283,12 +304,6 @@
        (and cid csec) (assoc :client-id cid :client-secret csec)
        (and tok (not (and cid csec))) (assoc :token tok)
        (and (not tok) (not (and cid csec))) (assoc :token "")))))
-
-(defn- pull-ir
-  "op:describe over `dir`'s .xsql against the backend → IR operations.
-   Requires `score/*client*` to be bound."
-  [{:keys [dir] :or {dir "synthigy"}}]
-  (:operations (c/describe (read-source dir))))
 
 (def schema-pretty
   "Cheshire printer tuned to `JSON.stringify(x, null, 2)` — byte-identical to
@@ -301,11 +316,11 @@
 (defn pull-schema!
   "GET /schema → `<dir>/schema.json`. Nothing at runtime reads this file; it is
    the snapshot XSQL editor tooling lints and completes against (`xsql-lint`,
-   and the LSP when it lands) — see docs/plans/PLAN-XSQL-TOOLING.md. Same filename and
+   and the LSP when it lands). Same filename and
    same indentation the JS and Go generators write, so a polyglot repo gets one
    artifact rather than one per language. Requires `score/*client*` bound: the
    snapshot must describe the same principal the IR did."
-  [{:keys [dir] :or {dir "synthigy"}}]
+  [{:keys [dir] :or {dir "xsql"}}]
   (let [path   (io/file dir "schema.json")
         schema (c/schema)]
     (io/make-parents path)
@@ -313,23 +328,74 @@
     (println "wrote" (str path) (str "(" (count (:entities schema)) " entities)"))
     path))
 
+(defn source-hash
+  "sha256 hex of the merged source — the `sourceHash` every SDK's generator
+   stamps on `ops.ir.json`, so one IR file serves all of them."
+  [src]
+  (let [d (.digest (java.security.MessageDigest/getInstance "SHA-256")
+                   (.getBytes ^String src "UTF-8"))]
+    (apply str (map #(format "%02x" (bit-and % 0xff)) d))))
+
+(defn ir-file [dir] (io/file dir "ops.ir.json"))
+
+(defn cached-ir
+  "The IR in `<dir>/ops.ir.json` when its sourceHash matches `src`, else nil."
+  [dir src]
+  (let [f (ir-file dir)]
+    (when (.exists f)
+      (let [ir (json/parse-string (slurp f) true)]
+        (when (= (:sourceHash ir) (source-hash src)) ir)))))
+
+(defn describe!
+  "op:describe `src` against the backend and save it as `<dir>/ops.ir.json`.
+   Requires `score/*client*` to be bound."
+  [dir src]
+  (let [ir (assoc (c/describe (read-files dir)) :sourceHash (source-hash src))
+        f  (ir-file dir)]
+    (io/make-parents f)
+    (spit f (str (json/generate-string ir {:pretty schema-pretty}) "\n"))
+    ir))
+
+(defn load-ir
+  "IR operations for `dir`: the saved `ops.ir.json` while it matches the
+   sources (offline), else a live describe that refreshes it. Never returns a
+   stale IR. `:pull true` forces the live describe. Returns
+   `{:operations [..] :pulled? bool}`."
+  [{:keys [dir pull] :or {dir "xsql"} :as opts}]
+  (let [src    (read-source dir)
+        cached (when-not pull (cached-ir dir src))]
+    (if cached
+      {:operations (:operations cached) :pulled? false}
+      (let [edited? (and (not pull) (.exists (ir-file dir)))]
+        (when edited? (println "sources changed since the last pull — refreshing"))
+        (try
+          {:operations (:operations (binding [score/*client* (pull-client opts)]
+                                      (describe! dir src)))
+           :pulled?    true}
+          (catch Exception e
+            (throw (ex-info (str "describe failed: " (ex-message e)
+                                 (cond
+                                   (= "validation" (:category (ex-data e))) ""
+                                   edited? " — the .xsql changed since the last pull; run under `synthigy exec` or revert the edit"
+                                   :else " — run under `synthigy exec` (endpoint + credentials)"))
+                            {:dir dir :cause (ex-message e) :cause-data (ex-data e)}))))))))
+
 (defn generate
-  "Pull IR from the backend (op:describe over `dir`'s .xsql) and emit source.
-   Also refreshes `<dir>/schema.json` for editor tooling.
-   Returns the seq of written paths."
+  "Emit source from `dir`'s .xsql: offline from a matching `ops.ir.json`, else
+   via a live op:describe that also refreshes it and `<dir>/schema.json`.
+   `:pull true` forces the refresh. Returns the seq of written paths."
   [opts]
-  (binding [score/*client* (pull-client opts)]
-    (let [operations (pull-ir opts)
-          paths      (emit-all operations opts)
-          ;; Editor artifact, not the deliverable — a /schema hiccup must not
-          ;; fail a build whose generated source is already on disk.
-          _ (try (pull-schema! opts)
-                 (catch Exception e
-                   (binding [*out* *err*]
-                     (println "warning: schema.json not refreshed —"
-                              (ex-message e)))))]
-      (println "done —" (count (filter #(xsql-verbs (:op %)) operations)) "ops")
-      paths)))
+  (let [{:keys [operations pulled?]} (load-ir opts)
+        paths (emit-all operations opts)]
+    (when pulled?
+      ;; Editor artifact, not the deliverable — a /schema hiccup must not
+      ;; fail a build whose generated source is already on disk.
+      (try (binding [score/*client* (pull-client opts)] (pull-schema! opts))
+           (catch Exception e
+             (binding [*out* *err*]
+               (println "warning: schema.json not refreshed —" (ex-message e))))))
+    (println "done —" (count (filter #(xsql-verbs (:op %)) operations)) "ops")
+    paths))
 
 (defn check*
   "The offline half of `check`: diff `emit-files` output for `operations`
@@ -354,14 +420,18 @@
      :stale   (vec (remove expected on-disk))}))
 
 (defn check
-  "CI gate: pull IR and verify the committed files under `out` match what
-   `generate` would write. Prints each missing/drifted/stale file and throws
+  "CI gate: verify the committed files under `out` match what `generate`
+   would write, from the saved IR while it is current, else a live describe. Prints each missing/drifted/stale file and throws
    (non-zero exit under -X) when anything is out of sync.
 
-     clj -X:gen-check :dir '\"synthigy\"' :out '\"src\"' :ns-prefix myapp.ops"
+     clj -X:gen-check :dir '\"xsql\"' :out '\"src\"' :ns-prefix myapp.ops"
   [opts]
-  ;; No `pull-schema!` here — `check` is a read-only drift gate.
-  (let [operations (binding [score/*client* (pull-client opts)] (pull-ir opts))
+  ;; Read-only drift gate: never rewrites ops.ir.json or schema.json.
+  (let [dir        (:dir opts "xsql")
+        src        (read-source dir)
+        operations (:operations (or (cached-ir dir src)
+                                    (binding [score/*client* (pull-client opts)]
+                                      (c/describe (read-files dir)))))
         {:keys [missing drifted stale] :as report} (check* operations opts)]
     (doseq [p missing] (println "missing:" p))
     (doseq [p drifted] (println "drifted:" p))
@@ -379,13 +449,13 @@
    0-arg stop fn.
 
      (defonce stop-gen
-       (gen/watch! {:dir \"synthigy\" :out \"src\" :ns-prefix \"myapp.ops\"}))"
+       (gen/watch! {:dir \"xsql\" :out \"src\" :ns-prefix \"myapp.ops\"}))"
   [{:keys [interval-ms] :or {interval-ms 500} :as opts}]
   (let [running  (atom true)
         done-src (atom ::none)   ; last successfully generated source
         last-err (atom nil)
         step!    (fn []
-                   (let [src (try (read-source (:dir opts "synthigy"))
+                   (let [src (try (read-source (:dir opts "xsql"))
                                   (catch Exception _ nil))]
                      (when (and src (not= src @done-src))
                        (try

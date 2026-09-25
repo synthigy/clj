@@ -1,7 +1,7 @@
 # Synthigy Clojure SDK
 
 Thin client for the Synthigy `/data` endpoint. Mirrors the shape of the
-TypeScript SDK (`sdk/js`) — same auth contract, same operations, same
+TypeScript SDK ([`@synthigy/sdk`](https://github.com/synthigy/js)) — same auth contract, same operations, same
 error codes.
 
 **Scope:** service-to-service and server-side work (JVM Clojure, Babashka,
@@ -49,17 +49,21 @@ core.async and JSON are built in.
 ```clojure
 (require '[synthigy.client :as synthigy])
 
-(synthigy/connect!
-  {:endpoint "http://localhost:7887"
-   :client-id "my-service"
-   :client-secret "..."})
+(synthigy/connect!)                         ; endpoint + identity from `synthigy exec`
 
-(synthigy/search :user
-  {:-where {:active {:-eq true}}}
-  {:name nil :roles [:name :active]})
+;; XSQL: the shape you write is the shape you get back
+(synthigy/query "
+movie (release_year > ?since:int, limit 10)
+  xid
+  title
+  ->genres
+    name" {:since 1990}
+                :acting-as user-xid)          ; per-call impersonation
 
-(synthigy/sync :user {:name "alice" :active true})   ;; => {:count 1}
+(synthigy/sync :movie {:title "Dune" :release-year 2021})   ;; => {:count 1}
 ```
+
+Run it with `synthigy exec -- clj -M -m myapp.main`.
 
 Writes are **silent by default** — `sync`/`stack` answer `{:count n}`, not the
 record. Mint the id up front when you need it; cheaper than the echo, and a
@@ -85,62 +89,103 @@ the raw wire keys, or `"camel"`.
 
 | Namespace | What | Use |
 |---|---|---|
-| `synthigy.client` | `connect!` + verbs: `search` `get` `sync` `stack` `delete` `batch`, XSQL `query`/`sql-template`, `watch-query`/`watch`/`watch-sql-template`/`close-watch!`, `history-*`, `schema`/`lint` | daily |
-| *generated* (via `synthigy.gen`) | `(movie/list {...})` — typed ops from your `.xsql` | daily |
+| `synthigy.client` | `connect!` + XSQL `query`/`sql-template`, writes `sync` `stack` `delete`, `batch`, `watch-sql-template`/`watch`/`close-watch!`, `history-*`, `schema`/`lint`/`compile` | daily |
+| *generated* (via `synthigy.gen`) | `(movie/list {...})`, `(movie/watch-list {...})`, `@batch` fns — from your `.xsql` | daily |
 | `synthigy.client.core` | `create-client`/`*client*` (binding), `op-*` builders for `batch`, `results->data`/`ok?`, `compose-tree` | data helpers |
 | `synthigy.client.subscriptions` | raw server subscription set | advanced — prefer watch |
 
 The SDK is designed to be used via the `:as synthigy` alias — some
-operations (`sync`, `get`) shadow `clojure.core`, so avoid `:refer`.
+operations (`sync`, `get`, `compile`) shadow `clojure.core`, so avoid `:refer`.
 
 ## Code generation
 
-A folder of `.xsql` operation documents compiles to committed Clojure source —
-one namespace per XSQL namespace, a documented fn per op (`(movie/list
-{:since 1990})`), `watch-<name>` fns for `@watch` ops, and one-request batch
-fns for `@batch`. The server is the only XSQL compiler (`op:describe`); the
-generated code embeds each op's source string and ships no parser.
+Write your queries in `.xsql` files and get typed functions for them. The
+server compiles the queries, so the types always match what it returns.
+
+**1. Get a server.** In your project folder:
 
 ```bash
-clj -X:gen :dir '"synthigy"' :out '"src"' :ns-prefix myapp.ops
+synthigy env init
+synthigy up
 ```
 
-Codegen runs under Babashka too — `bb gen` from a `bb.edn` task, same as on the
-JVM. The schema snapshot it writes is byte-identical to the JS and Go
-generators' output, so a polyglot repo keeps one artifact.
+The first `up` prints a `/setup` link; open it and pick a database. (No
+browser? `synthigy up --db sqlite` skips the wizard.) Already have a server?
+Skip this step.
 
-### Codegen authenticates as THE APP — not as you
+**2. Deploy your data model** in the modeler (or from code with `synthigy.client/deploy`, as a
+client with the Dataset Developer role).
 
-`/schema` and `describe` are IAM-filtered **per principal**, so whoever pulls
-the schema defines the generated surface. Generate with the app's own OAuth
-client credentials and the generated contract is exactly what the app can do
-at runtime; generate with a developer's personal identity and you ship types
-the app will 403 on. Client credentials are also the only path that works
-headless in CI (schema-drift checks on every PR).
+**3. Connect as your app.** Create its client once, then save it to the
+project:
 
-Provision the client once per project (core nREPL, or the modeler UI):
+```bash
+synthigy iam add-client "My App" --id my-app --type confidential \
+  --role "Dataset Explorer" --api Synthigy --grant client_credentials --local
+synthigy connect http://localhost:7887 --client-id my-app
+```
+
+`add-client` prints the secret once; `connect` asks for it. Code is generated
+for what this app is allowed to see. (`--local` works on the server's own
+machine; for a remote server, create the client in the console.)
+
+**4. Install the SDK:**
 
 ```clojure
-(require '[synthigy.iam :as iam])
-(iam/add-client {:id "my-app" :name "My App" :type :confidential
-                 :secret "..." :active true
-                 :settings {"allowed-grants" ["client_credentials" "refresh_token"]
-                            "redirections" ["http://localhost"]
-                            "trusted" true}})
+{:deps {com.synthigy/sdk {:mvn/version "0.1.0"}}}   ; deps.edn
 ```
 
-Grant the client's SERVICE user the roles your app needs, plus the
-**`schema:read`** scope for codegen introspection (`dataset:load` — the model
-tooling scope — also passes). Keep the secret in `.envrc` / CI secrets, like a
-database URL:
+**5. Write a query** in `xsql/movies.xsql`:
+
+```
+@search list
+movie (release_year > ?since:int=1990, limit ?limit:int=20)
+  xid
+  title
+  release_year
+```
+
+**6. Generate:**
 
 ```bash
-export SYNTHIGY_CLIENT_ID=my-app
-export SYNTHIGY_CLIENT_SECRET=...
+synthigy exec -- clj -X synthigy.gen/generate :ns-prefix myapp.ops
 ```
 
-Regenerate whenever an `.xsql` changes — the diff of the generated file shows
-exactly what changed. Commit inputs and output.
+This writes one namespace per XSQL namespace under `src/`, e.g. `src/myapp/ops/movie.clj`, and saves `xsql/schema.json` and `xsql/ops.ir.json`
+next to your queries.
+
+**7. Use it:**
+
+```clojure
+(ns myapp.main
+  (:require [synthigy.client :as c]
+            [myapp.ops.movie :as movie]))
+
+(defn -main []
+  (c/connect!)
+  (println (map :title (movie/list {:since 2000}))))
+```
+
+```bash
+synthigy exec -- clj -M -m myapp.main
+```
+
+`synthigy exec` gives your program the server address and the app's identity.
+Without it, pass them yourself: `(c/connect! {:endpoint ... :client-id ... :client-secret ...})`.
+
+**After you edit a query**, run step 6 again. As long as the `.xsql` files are
+unchanged it works offline from `xsql/ops.ir.json`; after an edit it needs the
+server, and it never generates from outdated results. In CI:
+
+```bash
+clj -X synthigy.gen/check :ns-prefix myapp.ops
+```
+
+**What to commit:** your `.xsql` files and `xsql/ops.ir.json`.
+`xsql/schema.json` is your whole data model, so commit it only in a private
+repo.
+
+`@watch` ops also get `watch-<name>`, and `@batch` ops become one-request fns. In a REPL, `(synthigy.gen/watch! {:ns-prefix "myapp.ops"})` regenerates and reloads on every `.xsql` save. Runs under Babashka too.
 
 ## Authentication
 
@@ -223,8 +268,7 @@ The pipe beats the env var deliberately: `exec` injects the cached token
 *and* supervises, and only the pipe can refresh mid-run — so a bot
 written this way runs unchanged bare, under `exec`, and under a
 production commander. CLJS has neither env vars nor a stdio parent, so in
-the browser one of options 1–3 is always required. See
-`docs/plans/PLAN-EXEC-IDENTITY.md`.
+the browser one of options 1–3 is always required.
 
 ### Explicit provider
 
@@ -248,15 +292,13 @@ engine runs in your own process there is nothing to talk to, so reach for
 **`synthigy.embedded`** (in core) rather than pointing this client inward:
 
 ```clojure
-(require '[synthigy.embedded :as synthigy]
-         '[synthigy.embedded.filter :as f])
+(require '[synthigy.embedded :as synthigy])
 
-(synthigy/search :user {:-where {:active (f/eq true)}} [:name])
-(synthigy/sync   :user {:name "alice" :active true})
-(synthigy/search "Human" nil [:first-name] :acting-as some-user-xid)
+(synthigy/query "user (limit 3)\n  name" nil :acting-as some-user-xid)
+(synthigy/sync  :user {:name "alice" :active true})
 ```
 
-Same verb names, same argument order, same selection shorthand, kebab-case
+Same verb names, same argument order, kebab-case
 both ways, `:acting-as` per call — dispatched straight at the engine, with no
 client, no `connect!` and no wire. Kebab-case and `:acting-as` are *server*
 features anyway (this SDK only sets `key_format` and `acting_as` in the
@@ -289,124 +331,115 @@ When Synthigy acts as the IdP for a downstream service:
 Use the returned token as a `Bearer` header against the downstream
 service directly — the SDK has no opinion on what that service looks like.
 
+### Logging users in (`login-start` / `login-complete`)
+
+Authorization code + PKCE for a confidential server (BFF), JVM (the browser has its own, see [Auth in the browser](#auth-in-the-browser)): the SDK
+owns the protocol, your app owns sessions, cookies and routing. `login-start`
+returns a URL, `login-complete` takes the callback's `code`/`state`; the
+handlers are yours. The in-flight login lives in a `:login-store` you supply —
+`{:put-fn (fn [state login]) :take-fn (fn [state])}`, `take-fn` one-shot.
+
+```clojure
+(require '[synthigy.client.login :as login])
+
+(c/connect! {:endpoint "http://localhost:7887"
+             :client-id "my-bff" :client-secret (System/getenv "BFF_SECRET")
+             :login-store (login/memory-login-store)})
+
+;; GET /login
+(redirect (:url (c/login-start callback-url :return-to "/movies")))
+
+;; GET /auth/callback?code=…&state=…  (or ?error=… when the user cancelled)
+(if error
+  (redirect (:return-to (c/login-cancel state) "/"))
+  (let [{:keys [user tokens return-to]} (c/login-complete code state callback-url)]
+    ;; user = {:xid :name :scopes}; your session, your cookie
+    (redirect return-to)))
+```
+
+- `(:xid user)` is read from the id_token — no `/data` lookup. Pass it as
+  `:acting-as` to act on the user's behalf.
+- `memory-login-store` is **single process**: behind a load balancer the
+  callback can land on an instance that never saw `/login`
+  (`LOGIN_STATE_UNKNOWN`). Back the store with what holds your sessions.
+- No store → `NO_LOGIN_STORE`; no `:client-secret` →
+  `LOGIN_REQUIRES_CONFIDENTIAL_CLIENT`. Other codes: `LOGIN_NONCE_MISMATCH`,
+  `LOGIN_EXCHANGE_FAILED` (with `:status`).
+- `:public-endpoint` on `login-start` when the browser reaches the IdP on a
+  different URL than this process does (containers, reverse proxies).
+- The code exchange never retries: an authorization code is one-shot.
+
 ## Operations
 
-All operations share the pattern `(op client entity ...)`. Single-op
-helpers return the data or throw `ExceptionInfo`. Batch mode returns
-raw result maps for inspection.
+Every op returns the data or throws `ExceptionInfo`, and takes the kwargs
+`:acting-as` (impersonation) and `:key-format` (per-call response casing).
 
 | Op | Purpose |
 |---|---|
-| `search` | List entities matching `args`, with selection |
-| `get` | Single entity by unique constraint |
+| `query` | XSQL read — `:op "get"` for one record |
+| `sql-template` | ERD-aware SQL with `{entity.field}` placeholders |
 | `sync` | Upsert — create or update by identity fields |
 | `stack` | Append to collection-valued relations without replacing |
 | `delete` | Delete specific records |
-| `purge` | Delete-where + return deleted data |
-| `slice` | Unlink relation without deleting |
-| `sql-template` | ERD-aware SQL with `{entity.field}` placeholders |
-| `search-tree` | Walk self-FK UP to ancestors |
-| `get-tree` | From root, return descendants |
+| `batch` | Several operations in one request |
 
-Every op supports kwargs `:acting-as` (impersonation) and `:key-format`
-(per-call override of response casing).
+Also available: `slice`/`purge`, `search-tree`/`get-tree`,
+`lint`/`compile`, `deployed-model`/`runtime-model`, and the `history-*`
+temporal ops (`get-at`, `events`, `diff`, `timeline`, `since`) — see their
+docstrings.
 
-Beyond the table, `query`/`lint` (XSQL selection-DSL + diagnostics),
-`deployed-model`/`runtime-model` (introspection), and the `history-*`
-temporal ops (`get-at`, `events`, `diff`, `timeline`, `since`) are also
-available — see their docstrings.
+### Filters, sorting, relations
 
-### Filters
-
-`synthigy.client.filter` mirrors the Go/JS condition helpers. In Clojure
-these are thin sugar over plain maps (`{:_eq v}`) — the combinators earn
-their keep:
+All of it is written in the query:
 
 ```clojure
-(require '[synthigy.client.filter :as f])
-
-(synthigy/search :user
-  {:-where {:active (f/eq true) :age (f/gt 18)}} [:name])
-
-(synthigy/search :user
-  {:-where (f/or {:role (f/eq "admin")} {:role (f/eq "owner")})} [:name])
+(synthigy/query "
+movie (release_year >= ?from:int, order by title asc, limit 20)
+  title (ilike ?q:string=\"%\")
+  ->genres
+    name" {:from 2000 :q "%dune%"})
 ```
+
+- `?name:type=default` are named params, passed as a map.
+- `->genres` is a **left** pull — a movie with no genres is still returned;
+  `-genres` is **inner** and keeps only movies that have one.
 
 ### Batch
 
-The op builders and result helpers live in `synthigy.client.core` — only
-`batch` itself is a network verb on `synthigy.client`:
+An `@batch` in your `.xsql` generates a function that sends every member in
+one request and returns them keyed by name; a failed member is an
+`ExceptionInfo` in its slot:
 
 ```clojure
-(require '[synthigy.client.core :as core])
-
-(let [ops [(core/op-sync :user {:name "alice"})
-           (core/op-search :user nil [:name])
-           (core/op-search :user_role nil [:name])]
-      [synced users roles] (core/results->data
-                             (synthigy/batch ops) ops)]
-  (when (core/all-ok? [synced users roles])
-    (println synced users roles)))
+(let [{:keys [list stats]} (movie/overview {:limit 3})]
+  ...)
 ```
 
-Failed operations come back as `ExceptionInfo` in their slot — use
-`core/ok?`, `core/all-ok?`, `core/errors` to triage.
-
-### Selection shorthand
-
-```clojure
-[:name :email]              ; → {:name nil :email nil}
-{:roles {:name nil}}        ; nested map
-{:roles [:name :active]}    ; vector of fields
-[:name {:roles [:name]}]    ; mixed
-```
-
-Kebab-case keys in `args`/selection are normalized to snake_case for the
-wire. Response casing is controlled by `:key-format` (client-level or
-per-call): `"kebab"`, `"camel"`, or `nil` for raw snake_case.
-
-### Trees
-
-`search-tree`/`get-tree` are network verbs on `synthigy.client`; the
-`compose-*` shapers are pure helpers on `synthigy.client.core`:
-
-```clojure
-(def records
-  (synthigy/search-tree :person :father
-    {:-where {:name {:-eq "Bart"}}}
-    [:xid :first-name {:father [:xid]}]))
-
-(core/compose-tree records {:on :father})
-;; => {:xid ... :first-name "Homer" :children [{:first-name "Bart" ...}]}
-```
-
-`core/compose-forest` handles multiple independent roots.
-
-## Live data — watch, watch-query & watch-sql-template
+## Live data — generated watches, watch-sql-template & watch
 
 The recommended live layer. All watches on a client share **one** SSE stream
 and **one** consolidated server-side subscription (their interests are
 unioned by an internal multiplexer, re-asserted on every reconnect).
 
-`watch-query` — a live, RLS-scoped result set as an **atom**:
+An op marked `@watch` in your `.xsql` generates a `watch-<name>` fn — a live,
+RLS-scoped result set as an **atom**:
 
 ```clojure
-(def msgs (synthigy/watch-query "Chato Message" nil [:content :published-on]
-                                :acting-as user-xid))
-@msgs                                        ; current rows
-(add-watch msgs :ui (fn [_ _ _ rows] ...))   ; react to changes
-(synthigy/close-watch! msgs)                 ; stop
+(def live (movie/watch-list {:limit 5} :acting-as user-xid))
+@live                                        ; current rows
+(add-watch live :ui (fn [_ _ _ rows] ...))   ; react to changes
+(synthigy/close-watch! live)                 ; stop
 ```
 
 Scope it to a "room" instead of the whole entity — record-interest plus
 row tracking (edits/deletes of visible rows still fire):
 
 ```clojure
-(synthigy/watch-query "Chato Message" nil [:content]
-                      :acting-as user-xid
-                      :entity-track false
-                      :records [group-xid]
-                      :track-rows true)
+(message/watch-list {:room room-xid}
+                    :acting-as user-xid
+                    :entity-track false
+                    :records [room-xid]
+                    :track-rows true)
 ```
 
 Raw change events without a result set:
@@ -439,7 +472,7 @@ A template has no root entity, so the entities to observe must be named:
 ```clojure
 (def stats (synthigy/watch-sql-template
              "SELECT count(*) AS n FROM {movie}" nil
-             :entities ["Movie"]))
+             :entities ["movie"]))
 @stats
 (synthigy/close-watch! stats)
 ```
@@ -469,7 +502,7 @@ Opt-in helper for transient failures on idempotent reads.
 (require '[synthigy.client.retry :as retry])
 
 (retry/with-retry
-  (fn [] (synthigy/search :user nil [:name]))
+  (fn [] (synthigy/query "movie (limit 5)\n  title" nil))
   {:max-attempts 3
    :backoff-ms 500
    :max-backoff-ms 10000
@@ -486,7 +519,29 @@ committed.
 
 ## Errors
 
-All errors are `ExceptionInfo` with `:code` in `ex-data`:
+All errors are `ExceptionInfo`. `ex-data` carries `:code` (stable — branch on
+it, never on the message), `:category` and `:retryable`, from the same code
+table as the Go, JS, Python and PHP SDKs:
+
+| `:category` | Meaning | `:retryable` |
+|---|---|---|
+| `auth` | Token, session or IdP problem — re-authenticate | no |
+| `iam` | RBAC/RLS denial | no |
+| `validation` | The request (or client config) is wrong | no |
+| `not_found` | Unknown entity, relation or template | no |
+| `conflict` | Constraint violation | no |
+| `rate_limit` | Too many requests, `TIMEOUT` | yes |
+| `network` | No HTTP response | yes |
+| `internal` | Unexpected server error; also any code the table doesn't know | yes |
+
+```clojure
+(try (c/search :movie nil [:title])
+     (catch clojure.lang.ExceptionInfo e
+       (let [{:keys [code retryable]} (ex-data e)]
+         (if retryable (retry-later) (throw e)))))
+```
+
+Common codes:
 
 | Code | Meaning |
 |---|---|
@@ -511,6 +566,11 @@ SYNTHIGY_TEST_ENDPOINT=http://localhost:7887 \
 SYNTHIGY_TEST_CLIENT_ID=test-sdk \
 SYNTHIGY_TEST_CLIENT_SECRET=test-secret \
   clj -M:integration
+
+# Live browser login, played headlessly (confidential client + password user)
+SYNTHIGY_TEST_LOGIN_CLIENT_ID=… SYNTHIGY_TEST_LOGIN_CLIENT_SECRET=… \
+SYNTHIGY_TEST_LOGIN_USER=… SYNTHIGY_TEST_LOGIN_PASSWORD=… \
+  clj -M:login-integration
 ```
 
 ## Browser build (ClojureScript)
@@ -540,79 +600,72 @@ or a `:local/root` dep) — same `synthigy.client` namespace, same verbs.
   {:endpoint "http://localhost:7887"
    :token-fn (fn [] (my-app/get-access-token))})   ; see "Auth in the browser" below
 
-(p/let [users (synthigy/search :user nil [:name])]
-  (js/console.log (clj->js users)))
+(p/let [movies (synthigy/query "movie (limit 5)\n  title" nil)]
+  (js/console.log (clj->js movies)))
 ```
 
 Every network verb returns a **Promise** instead of blocking; the data helpers
 (`op-*`, `results->data`, `compose-tree`, `ok?`) are identical to the JVM side.
-The browser transport defaults to **JSON**; pass `:wire-format :transit` to
-`connect!` for EDN-native values (keywords, sets, instants) end to end.
+`/data` speaks **transit** in both builds (JVM and browser) — EDN-native
+values end to end: keywords, sets, instants as real `js/Date`, and the
+engine's `_agg` BigDecimals as JS numbers (the reader carries `f`/`n`
+handlers; transit's default hands back an opaque tagged value). Sibling
+endpoints that force JSON server-side (`/schema`, `/lint`) are decoded as
+JSON, by response Content-Type. There is no `:wire-format` option.
 
 ### Auth in the browser
 
-**This SDK ships no auth code** — the `{:token-fn :invalidate-fn}` seam from
-the [Authentication](#authentication) section is the entire browser story too.
-That's deliberate: a browser app is (or should be) a **public** OAuth client —
-there is nowhere to hide a `client-secret`, so the `:client-id`+`:client-secret`
-convenience path from the JVM section does not apply here, and `create-client`
-will refuse it without a secret. Bring your own token source instead:
+A browser is a **public** OAuth client: nowhere to hide a secret, so
+`auth/oauth` (client credentials) throws there. `synthigy.client.login` logs
+the user in with authorization code + PKCE and keeps the session alive by
+silent renew, the same model as oidc-client-ts: tokens in memory only, no
+refresh token, a hidden iframe re-authorizes with `prompt=none` against the
+Synthigy session cookie.
 
 ```clojure
-(synthigy/connect!
-  {:endpoint "http://localhost:7887"
-   :token-fn      (fn [] (my-auth/get-access-token))
-   :invalidate-fn (fn [] (my-auth/force-renew!))})   ; called once on a 401, then retried
+(require '[synthigy.client :as synthigy]
+         '[synthigy.client.login :as login])
+
+;; first thing on the silent redirect page — answers the renewal iframe
+(when-not (login/silent-callback!)
+  (login/configure! {:endpoint "http://localhost:7887"
+                     :client-id "my-spa"               ; a PUBLIC client
+                     :redirect-uri (str js/location.origin "/callback")
+                     :audience "https://synthigy.com"})
+  (synthigy/connect! (merge {:endpoint "http://localhost:7887"} (login/provider)))
+  (if (login/callback?)
+    (p/let [{:keys [return-to]} (login/login-complete)] (navigate! return-to))
+    (-> (login/renew!)                                  ; restore after a reload
+        (p/catch (fn [_] (show-login-button!))))))
+
+;; the button
+(login/login-start :return-to "/movies")
 ```
 
-Two real integrations, depending on what you already have:
+- `redirect-uri` and `silent-redirect-uri` (defaults to `redirect-uri`) must be
+  registered on the client. A tiny static page that only calls
+  `silent-callback!` as the silent redirect keeps the renewal iframe from
+  loading your whole app.
+- Renewal runs 60s before expiry. Token lifetime is the server's.
+- Events via `(login/on event f)`: `:user-loaded`, `:user-unloaded`,
+  `:access-token-expiring`, `:access-token-expired`, `:silent-renew-error`.
+- `login/user` is the id_token's claims, merged with `/oauth/userinfo` when
+  `:load-user-info? true` (off by default, as in oidc-client-ts — the id_token
+  carries `sub`/`xid`, the profile fields such as `name` come from userinfo); `login/logout!` ends the server
+  session; `login/remove-user!` forgets it locally.
+- On a 401 the provider starts a renewal and the SDK's retry waits for it.
+- **Cross-site**: when your app and Synthigy are on different sites, Safari,
+  Firefox and Chrome-with-third-party-cookies-off hide the session cookie from
+  the iframe, so renewal answers `login_required`. The SDK does not redirect on
+  its own — handle `:silent-renew-error`, typically with
+  `(login/login-start :prompt "none")`: a top-level redirect is first-party, so
+  a live session bounces straight back without a login form.
+- Codes: `LOGIN_STATE_UNKNOWN`, `LOGIN_NONCE_MISMATCH`, `LOGIN_EXCHANGE_FAILED`,
+  `SILENT_TIMEOUT`, or the authorization error itself (`login_required`,
+  `access_denied`).
 
-- **Already have a backend** (BFF / server that mints tokens for the SPA)?
-  Use it — `:token-fn` just reads whatever your host page already has, same
-  as the JVM SDK's convenience path but with an OAuth flow you control
-  yourself. This is the recommended default; `acting_as` (identity
-  multiplexing) is a confidential-client/BFF feature and the server rejects
-  it outright for public clients (`PUBLIC_CLIENT_FORBIDDEN`) — with a BFF you
-  keep that option.
-- **No backend — the browser talks to Synthigy directly** as a public OAuth
-  client (`authorization_code` + PKCE). Wire a library like
-  [`oidc-client-ts`](https://github.com/authts/oidc-client-ts) — its
-  `UserManager` with `automaticSilentRenew: true` and
-  `userStore: new WebStorageStateStore({ store: new InMemoryWebStorage() })`
-  keeps tokens in memory only (never `localStorage`/`sessionStorage`) and
-  silently refreshes via a hidden iframe against the IdP session cookie —
-  no refresh token ever reaches the browser:
-
-  ```js
-  import { UserManager, WebStorageStateStore, InMemoryWebStorage } from 'oidc-client-ts'
-
-  const userManager = new UserManager({
-    authority: 'http://localhost:7887',
-    client_id: 'my-spa',                 // a PUBLIC client — no secret, ever
-    redirect_uri: window.location.origin + '/callback',
-    response_type: 'code',               // authorization_code + PKCE
-    automaticSilentRenew: true,
-    userStore: new WebStorageStateStore({ store: new InMemoryWebStorage() }),
-  })
-
-  window.SYNTHIGY_TOKEN_FN = async () => {
-    const user = await userManager.getUser()
-    return user?.access_token
-  }
-  window.SYNTHIGY_INVALIDATE_FN = () => userManager.signinSilent()
-  ```
-
-  ```clojure
-  (synthigy/connect!
-    {:endpoint "http://localhost:7887"
-     :token-fn      #(js/window.SYNTHIGY_TOKEN_FN)
-     :invalidate-fn #(js/window.SYNTHIGY_INVALIDATE_FN)})
-  ```
-
-  Silent renew needs the SPA served same-site with Synthigy (the renew
-  iframe carries the IdP session cookie — third-party-cookie contexts are
-  increasingly blocked by browsers). Cross-site deployments fall back to a
-  visible re-login when the token expires.
+`acting_as` stays a confidential-client (BFF) feature; with a public client the
+user is the principal and RLS binds to the token itself.
 
 ### Live data in the browser
 
@@ -640,10 +693,6 @@ you have a handle) and return the same `{:interest :set-interest :add
 with optimistic mutations, change tracking, and batched commit. This SDK is
 a thin fetch/watch layer over `/data`, not a store; layer your own cache on
 top if you need one.
-
-If you're bypassing the SDK entirely and talking Transit straight (as
-`frontend/modeling` historically does), that still works — but the browser
-build with `:wire-format :transit` is now a first-class option.
 
 This SDK is the right tool when:
 - You're writing a Clojure service that talks to Synthigy (CRUD,

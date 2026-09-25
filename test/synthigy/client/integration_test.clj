@@ -187,7 +187,7 @@
 
 (deftest missing-auth-test
   ;; Only meaningful with no SYNTHIGY_TOKEN/SYNTHIGY_SUPERVISED in the test
-  ;; environment — both are env-level fallbacks now (PLAN-EXEC-IDENTITY step 3).
+  ;; environment — both are env-level fallbacks.
   (is (thrown-with-msg? clojure.lang.ExceptionInfo
                         #"no Synthigy token"
                         (core/create-client {:endpoint endpoint}))))

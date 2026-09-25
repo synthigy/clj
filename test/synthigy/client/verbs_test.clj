@@ -158,3 +158,13 @@
     (is (= "delete" (:op op)))
     (is (= "dataset" (:entity op)))
     (is (= {:xid "ds-1"} (:data op)))))
+
+(deftest sync-and-stack-take-a-vector-in-one-operation
+  (let [body (with-capture {:results [{:ok true :data {:count 2}}]}
+               #(is (= {:count 2} (client/sync :movie [{:title "A"} {:title "B"}]))))
+        ops  (:operations body)]
+    (is (= 1 (count ops)))
+    (is (= [{:title "A"} {:title "B"}] (:data (first ops)))))
+  (let [op (first (:operations (with-capture {:results [{:ok true :data [{:xid "a"}]}]}
+                                  #(client/stack :movie [{:xid "a"}] :returning true))))]
+    (is (= ["stack" true] ((juxt :op :returning) op)))))

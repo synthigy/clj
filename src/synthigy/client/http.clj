@@ -13,6 +13,7 @@
    any) is called to force a token refresh, then the request is retried
    once. If that still fails with 401, UNAUTHORIZED is thrown."
   (:require
+   [synthigy.client.error :as err]
    [babashka.http-client :as http]
    [babashka.json :as json]
    [clojure.java.io :as io]
@@ -117,12 +118,12 @@
                        (authed-once client method url opts))
                    r))]
       (when (= 401 (:status resp))
-        (throw (ex-info "Unauthorized"
+        (throw (err/ex-info "Unauthorized"
                         {:code "UNAUTHORIZED" :status 401})))
       resp)
     (catch clojure.lang.ExceptionInfo e (throw e))
     (catch Exception e
-      (throw (ex-info (str "Transport error: " (.getMessage e))
+      (throw (err/ex-info (str "Transport error: " (.getMessage e))
                       {:code "TRANSPORT_ERROR"
                        :cause e}))))))
 
@@ -159,7 +160,7 @@
     (if (<= 200 status 299)
       (parse-body body ct)
       (let [parsed (parse-body body ct)]
-        (throw (ex-info (or (get-in parsed [:error :message])
+        (throw (err/ex-info (or (get-in parsed [:error :message])
                             (str context " failed: HTTP " status))
                         {:code (or (get-in parsed [:error :code]) "HTTP_ERROR")
                          :status status
@@ -207,8 +208,8 @@
     (let [parsed (parse-json-body body)
           code (some-> parsed :error str/upper-case)]
       (if code
-        (throw (ex-info (str label " failed: " code) {:code code :status status}))
-        (throw (ex-info (str label " request failed: HTTP " status)
+        (throw (err/ex-info (str label " failed: " code) {:code code :status status}))
+        (throw (err/ex-info (str label " request failed: HTTP " status)
                         {:code "HTTP_ERROR" :status status :body body}))))))
 
 
@@ -249,7 +250,7 @@
                   last-event-id (assoc "Last-Event-ID" last-event-id))
         resp (authed :get url {:headers headers :as :stream})]
     (when-not (<= 200 (:status resp) 299)
-      (throw (ex-info (str "SSE connect failed: HTTP " (:status resp))
+      (throw (err/ex-info (str "SSE connect failed: HTTP " (:status resp))
                       {:code "HTTP_ERROR" :status (:status resp)})))
     (:body resp)))
 

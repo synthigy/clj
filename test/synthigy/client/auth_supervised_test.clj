@@ -2,7 +2,7 @@
   "Contract test for the supervised-stdio token source — spawns a `bb` child
    (cheapest way to get `synthigy.client.auth` on a classpath — bb.edn's
    [\"src\"] path is discovered from the inherited cwd) under a stub parent
-   speaking `auth.token`, per docs/plans/PLAN-EXEC-IDENTITY.md steps 3-4.
+   speaking `auth.token`.
    The child prints its result to STDERR as EDN so the test's own
    bookkeeping never collides with the protocol channel it's exercising —
    stdout is exclusively `auth.token` frames.

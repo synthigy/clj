@@ -86,13 +86,15 @@
   (is (= {:op "runtime-model"} (core/op-runtime-model))))
 
 (deftest op-xsql-shape
-  (testing "xsql read → :selections + :entity ride, :op preserved"
+  (testing "xsql read → the xsql document op, the verb in its header"
     (let [op (core/op-xsql {:op "search" :source "movie\n  title" :entity "movie"}
                            {:y 1990})]
-      (is (= "search" (:op op)))
-      (is (= "movie\n  title" (:selections op)))
-      (is (= "movie" (:entity op)))
-      (is (= {:y 1990} (:params op)))))
+      (is (= "xsql" (:op op)))
+      (is (= "@search _q\nmovie\n  title" (:xsql op)))
+      (is (not (contains? op :selections)))
+      (is (= {:y 1990} (:params op))))
+    (is (= "@get detail\nmovie\n  title"
+           (:xsql (core/op-xsql {:op "get" :source "@get detail\nmovie\n  title"} nil)))))
   (testing "xsql sql-template → template path, no :entity/:selections"
     (let [op (core/op-xsql {:op "sql-template" :source "SELECT 1"} nil)]
       (is (= "sql-template" (:op op)))

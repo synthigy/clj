@@ -19,6 +19,7 @@
      (oauth {:client-id ...})      — client-credentials flow, caches per
                                      audience, refreshes before expiry"
   (:require
+   [synthigy.client.error :as err]
    [babashka.http-client :as http]
    [babashka.json :as json])
   (:import
@@ -32,7 +33,7 @@
   {:token-fn (fn
                ([] token)
                ([_audience]
-                (throw (ex-info "Static token cannot fetch per-audience tokens"
+                (throw (err/ex-info "Static token cannot fetch per-audience tokens"
                                 {:code "CONFIG_ERROR"}))))
    :invalidate-fn (fn ([]) ([_audience]))})
 
@@ -49,7 +50,7 @@
                     :throw false})
         status (:status response)]
     (when-not (<= 200 status 299)
-      (throw (ex-info (str "Token request failed: HTTP " status)
+      (throw (err/ex-info (str "Token request failed: HTTP " status)
                       {:code "TOKEN_ERROR" :status status :body (:body response)})))
     (let [body (json/read-str (:body response) {:key-fn keyword})
           {:keys [access_token expires_in]} body]
@@ -129,8 +130,7 @@
 
 
 ;; ============================================================================
-;; Supervised stdio — SYNTHIGY_SUPERVISED=1, docs/plans/PLAN-EXEC-IDENTITY.md
-;; steps 2-4. The SDK never mints locally under this mode: the CLI/commander
+;; Supervised stdio — SYNTHIGY_SUPERVISED=1. The SDK never mints locally under this mode: the CLI/commander
 ;; is the platform's stdio owner, so a token is asked for over JSON-RPC on
 ;; the process's OWN stdio (supervise grammar) instead. `{token, expires_in}`
 ;; is deliberately byte-compatible with robotics' `request-access-token`
@@ -191,7 +191,7 @@
       (.start))))
 
 (defn- supervised-write-frame!
-  "Atomic single write of `frame + \\n` (PLAN-EXEC-IDENTITY step 3's frame
+  "Atomic single write of `frame + \\n` (the frame
    rule). Returns false on a write failure (broken pipe — parent already
    gone) instead of raising; the caller falls through to the timeout path."
   [frame]
@@ -232,7 +232,7 @@
                 msg (supervised-ask "auth.token" params supervised-timeout-ms)]
             (cond
               (nil? msg)
-              (throw (ex-info
+              (throw (err/ex-info
                       (str "Timed out waiting for auth.token from the supervising "
                            "parent — a hung or missing parent must not hang the "
                            "bot. Check the parent process (synthigy exec/agent, "
@@ -240,13 +240,13 @@
                       {:code "NO_TOKEN"}))
 
               (:error msg)
-              (throw (ex-info (or (get-in msg [:error :message]) "auth.token request denied")
+              (throw (err/ex-info (or (get-in msg [:error :message]) "auth.token request denied")
                               {:code "NO_TOKEN"}))
 
               :else
               (let [token (get-in msg [:result :token])]
                 (when-not token
-                  (throw (ex-info "auth.token response carried no token" {:code "NO_TOKEN"})))
+                  (throw (err/ex-info "auth.token response carried no token" {:code "NO_TOKEN"})))
                 ;; A malformed/non-numeric expires_in from the parent must
                 ;; not crash the cache-expiry computation.
                 (let [expires-in (try (double (get-in msg [:result :expires_in]))
@@ -259,7 +259,7 @@
 (defn supervised
   "Provider for SYNTHIGY_SUPERVISED=1 — asks `auth.token` over the process's
    own stdio instead of minting locally; the CLI/commander is the
-   platform's stdio owner (PLAN-EXEC-IDENTITY step 2). A thin handle onto
+   platform's stdio owner. A thin handle onto
    a process-wide reader + cache: every `supervised` provider constructed
    in one process shares one stdin reader and one token cache instead of
    each asking the parent independently."
@@ -272,10 +272,10 @@
                     ([audience] (swap! supervised-tokens dissoc (or audience ""))))})
 
 (defn no-token-error
-  "The teaching throw — PLAN-EXEC-IDENTITY step 3: the error IS the UX, no
+  "The teaching throw: the error IS the UX, no
    flag, no silent anonymous fallback."
   []
-  (ex-info
+  (err/ex-info
    (str "no Synthigy token: set SYNTHIGY_TOKEN, or SYNTHIGY_CLIENT_ID + "
         "SYNTHIGY_CLIENT_SECRET, or run under `synthigy exec` (or a "
         "Synthigy agent) so a parent can supply one.")

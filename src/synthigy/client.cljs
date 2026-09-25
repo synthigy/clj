@@ -7,8 +7,9 @@
 
   THE INVARIANT: one process, one client, one backend — identity is
   multiplexed per-call with `:acting-as`, never with a second client."
-  (:refer-clojure :exclude [sync get])
+  (:refer-clojure :exclude [sync get compile])
   (:require
+   [synthigy.client.error :as err]
    [clojure.string :as str]
    [synthigy.client.core :as core]
    [synthigy.client.http :as http]
@@ -58,13 +59,14 @@
   (single-result (core/op-get entity args selection) opts))
 
 (defn sync
-  "Sync (upsert) entity data — resolves to {:count n}. Pass `:returning true`
+  "Sync (upsert) one record (a map) or many (a vector — one operation, for
+  bulk import) — resolves to {:count n}. Pass `:returning true`
    for the written records."
   [entity data & {:keys [returning] :as opts}]
   (single-result (core/op-sync entity data returning) opts))
 
 (defn stack
-  "Stack data on top of current state — resolves to {:count n}. Same
+  "Stack one record or a vector of them on top of current state — resolves to {:count n}. Same
    `:returning` contract as sync."
   [entity data & {:keys [returning] :as opts}]
   (single-result (core/op-stack entity data returning) opts))
@@ -124,16 +126,6 @@
 ;; XSQL query + lint
 ;; =======================================================================
 
-(defn- xsql-document
-  "Ensure an XSQL operation DOCUMENT (STRICT wire: XSQL travels only as
-   {:op \"xsql\" :xsql <document>}). Sources already starting with `@` pass
-   through — their @verb is authoritative; bare rooted bodies get a
-   synthetic `@<op> _q` header."
-  [source op]
-  (if (clojure.string/starts-with? (clojure.string/triml source) "@")
-    source
-    (str "@" (name op) " _q\n" source)))
-
 (defn query
   "Run an XSQL query with optional ?name:type[] params. STRICT wire: sends
    the `xsql` DOCUMENT op ({:op \"xsql\" :xsql <document> :params …}) — a
@@ -141,7 +133,7 @@
    server derives verb/entity/selections/args from the document. `:op`
    defaults to \"search\" — pass :op :get for a unique-key read. Returns a Promise."
   [xsql params & {:keys [op] :or {op "search"} :as opts}]
-  (single-result (cond-> {:op "xsql" :xsql (xsql-document xsql op)}
+  (single-result (cond-> {:op "xsql" :xsql (core/xsql-document xsql op)}
                    params (assoc :params params))
                  opts))
 
@@ -172,6 +164,21 @@
                             entity (assoc :entity (name entity))
                             op (assoc :op (name op))))
           :diagnostics))
+
+(defn compile
+  "Compile an XSQL `source` to the wire operation the engine would execute
+   (POST /compile) — same coercion as a real call, nothing runs. Returns a
+   Promise of the op map; edit it and POST it to /data yourself."
+  [source & {:keys [op params] :or {op "search"}}]
+  (p/then (http/post-json (str (http/base-url) "/compile")
+                          (cond-> {:operations [{:op "xsql"
+                                                 :xsql (core/xsql-document source op)}]}
+                            params (assoc-in [:operations 0 :params] params)))
+          (fn [{:keys [results]}]
+            (let [{:keys [ok operation error]} (first results)]
+              (if ok
+                operation
+                (throw (err/ex-info (:message error) (or error {}))))))))
 
 ;; =======================================================================
 ;; Account onboarding
@@ -519,8 +526,8 @@
    options."
   [template params & {:keys [entities] :as opts}]
   (when-not (seq entities)
-    (throw (ex-info "watch-sql-template needs :entities — a SQL template has no root entity to infer the watch interest from"
-                    {:template template})))
+    (throw (err/ex-info "watch-sql-template needs :entities — a SQL template has no root entity to infer the watch interest from"
+                    {:code "MISSING_ENTITIES" :template template})))
   (watch-xsql {:op "sql-template" :source template} params
               (-> opts
                   (dissoc :entities)

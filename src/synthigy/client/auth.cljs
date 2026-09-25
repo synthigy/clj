@@ -10,10 +10,10 @@
                       `token-fn` call refetches.
 
    The SDK calls `token-fn` before every request; on HTTP 401 it calls
-   `invalidate-fn` (if present) and retries once. The two defaults shipped
-   here cover 90% of SDK use — teams wanting OIDC / PKCE / silent renew
-   should plug their own `:token-fn` / `:invalidate-fn` in."
+   `invalidate-fn` (if present) and retries once. `oauth` is for Node; a
+   browser logs in through `synthigy.client.login/provider`."
   (:require
+   [synthigy.client.error :as err]
    [promesa.core :as p]))
 
 
@@ -23,7 +23,7 @@
   {:token-fn (fn
                ([] token)
                ([_audience]
-                (throw (ex-info "Static token cannot fetch per-audience tokens"
+                (throw (err/ex-info "Static token cannot fetch per-audience tokens"
                                 {:code "CONFIG_ERROR"}))))
    :invalidate-fn (fn ([]) ([_audience]))})
 
@@ -50,7 +50,7 @@
           {:access-token access-token
            :expires-at (+ (js/Date.now) (* expires-in 1000))})
         (p/let [body-text (.text resp)]
-          (throw (ex-info (str "Token request failed: HTTP " status)
+          (throw (err/ex-info (str "Token request failed: HTTP " status)
                           {:code "TOKEN_ERROR" :status status :body body-text})))))))
 
 
@@ -81,6 +81,9 @@
     :as config}]
   (assert (and token-url client-id client-secret)
           "oauth requires :token-url, :client-id, :client-secret")
+  (when (exists? js/document)
+    (throw (err/ex-info "client_credentials in a browser ships the secret to every visitor — use synthigy.client.login"
+                    {:code "CONFIG_ERROR"})))
   ;; cache entry per audience is either {:token <map>} (a resolved token) or
   ;; {:promise <Promise>} (a fetch in flight). Caching the in-flight promise
   ;; makes refresh single-flight: overlapping callers share one request

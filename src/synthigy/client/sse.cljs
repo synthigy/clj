@@ -8,6 +8,7 @@
 
    Auto-reconnects with Last-Event-ID + exponential backoff (1s → 30s)."
   (:require
+   [synthigy.client.error :as err]
    [clojure.string :as str]
    [promesa.core :as p]
    [synthigy.client.http :as http]))
@@ -125,7 +126,7 @@
                                         (fn [_]
                                           (when-not @stopped?
                                             (reconnect 1000)))))
-                              (throw (ex-info (str "SSE connect failed: HTTP " status)
+                              (throw (err/ex-info (str "SSE connect failed: HTTP " status)
                                               {:code "HTTP_ERROR" :status status}))))))
                        (p/catch
                         (fn [e]

@@ -9,6 +9,7 @@
    any) is called to force a token refresh, then the request is retried
    once. If that still fails with 401, UNAUTHORIZED is thrown."
   (:require
+   [synthigy.client.error :as err]
    [cljs-bean.core :refer [->js]]
    [clojure.string :as str]
    [cognitect.transit :as transit]
@@ -18,11 +19,11 @@
 
 ;; /data speaks transit so temporal values arrive as real js/Date (JSON would
 ;; flatten them to strings). Writer is compact `:json`; the reader auto-detects
-;; verbose too, so it reads whatever the server emits. No custom handlers — the
-;; wire carries plain maps/scalars + built-in dates/keywords/sets; the deployed
-;; model comes back as a pre-encoded transit STRING (decoded by the frontend).
-(def ^:private tw (transit/writer :json))
-(def ^:private tr (transit/reader :json))
+;; verbose too, so it reads whatever the server emits. `~f`/`~n` (the engine
+;; bigdec's `_agg` leaves) decode to JS numbers — transit-js's default keeps
+;; them as opaque TaggedValues.
+(def tw (transit/writer :json))
+(def tr (transit/reader :json {:handlers {"f" js/parseFloat "n" js/parseInt}}))
 
 
 (defn token
@@ -144,14 +145,14 @@
       (p/then
        (fn [resp]
          (if (= 401 (:status resp))
-           (throw (ex-info "Unauthorized"
+           (throw (err/ex-info "Unauthorized"
                            {:code "UNAUTHORIZED" :status 401}))
            resp)))
       (p/catch
        (fn [e]
          (if (instance? ExceptionInfo e)
            (throw e)
-           (throw (ex-info (str "Transport error: " (ex-message e))
+           (throw (err/ex-info (str "Transport error: " (ex-message e))
                            {:code "TRANSPORT_ERROR" :cause e}))))))))
 
 
@@ -160,7 +161,7 @@
   (if (<= 200 status 299)
     (parse-body body-text content-type)
     (let [parsed (parse-body body-text content-type)]
-      (throw (ex-info (or (get-in parsed [:error :message])
+      (throw (err/ex-info (or (get-in parsed [:error :message])
                           (str context " failed: HTTP " status))
                       {:code (or (get-in parsed [:error :code]) "HTTP_ERROR")
                        :status status
@@ -218,8 +219,8 @@
     (let [parsed (parse-body body-text content-type)
           code (some-> (:error parsed) str/upper-case)]
       (if code
-        (throw (ex-info (str label " failed: " code) {:code code :status status}))
-        (throw (ex-info (str label " request failed: HTTP " status)
+        (throw (err/ex-info (str label " failed: " code) {:code code :status status}))
+        (throw (err/ex-info (str label " request failed: HTTP " status)
                         {:code "HTTP_ERROR" :status status :body body-text}))))))
 
 

@@ -5,6 +5,7 @@
    subscription wire shapes. No transport here; `synthigy.client` (.clj /
    .cljs) owns the verbs."
   (:require
+   [synthigy.client.error :as err]
    [clojure.string :as str]
    [synthigy.client.selection :as selection]
    [synthigy.client.auth :as auth]))
@@ -28,7 +29,7 @@
   "The connected client, or a loud NOT_CONNECTED error."
   []
   (or *client*
-      (throw (ex-info "Not connected — call (synthigy.client/connect! {:endpoint … :client-id …}) first"
+      (throw (err/ex-info "Not connected — call (synthigy.client/connect! {:endpoint … :client-id …}) first"
                       {:code "NOT_CONNECTED"}))))
 
 (defn create-client
@@ -51,7 +52,7 @@
          :client-id + :client-secret   → auth/oauth
 
   Options:
-    :endpoint       — Server URL (e.g. \"http://localhost:7887\")
+    :endpoint       — Server URL (e.g. \"http://localhost:7887\"); default $SYNTHIGY_ENDPOINT
     :token-fn       — 0-arg fn returning a bearer token. Optional 1-arg
                       variant `(f audience)` for IdP federation.
     :invalidate-fn  — Optional 0/1-arg fn clearing the provider's cache.
@@ -61,8 +62,8 @@
     :client-secret  — (convenience) OAuth client secret
                       — JVM only: with none of the above, falls back to
                       SYNTHIGY_SUPERVISED=1 stdio (the pipe beats the env
-                      var — it can refresh mid-run), then SYNTHIGY_TOKEN env
-                      (docs/plans/PLAN-EXEC-IDENTITY.md step 3); else throws
+                      var — it can refresh mid-run), then SYNTHIGY_TOKEN env;
+                      else throws
                       {:code \"NO_TOKEN\"}. CLJS always requires a source.
     :audience       — (convenience) default audience bound to every
                       client_credentials mint. The platform's audience model
@@ -87,25 +88,30 @@
 
                       Hooks fire per attempt — a 401 retry fires them twice.
                       Hook exceptions are caught + logged to *err*, never
-                      bubble into the caller."
+                      bubble into the caller.
+    :login-store    — (JVM) in-flight browser logins for `login-start` /
+                      `login-complete`: {:put-fn :take-fn}, see
+                      `synthigy.client.login`. Unset = login throws NO_LOGIN_STORE."
   [{:keys [endpoint key-format request-timeout
            token-fn invalidate-fn
            token client-id client-secret token-url token-buffer audience
-           on-request on-response on-error]
+           on-request on-response on-error login-store]
     :or {request-timeout 30000 key-format "kebab"}
     :as opts}]
   (let [known #{:endpoint :key-format :request-timeout
                 :token-fn :invalidate-fn
                 :token :client-id :client-secret :token-url :token-buffer
-                :audience :on-request :on-response :on-error}
+                :audience :on-request :on-response :on-error :login-store}
         unknown (seq (remove known (keys opts)))]
     (when unknown
-      (throw (ex-info (str "create-client: unknown option(s) " (pr-str unknown))
+      (throw (err/ex-info (str "create-client: unknown option(s) " (pr-str unknown))
                       {:code "CONFIG_ERROR" :unknown unknown :known known}))))
-  (when-not endpoint
-    (throw (ex-info "create-client requires :endpoint"
-                    {:code "CONFIG_ERROR"})))
-  (let [env-token #?(:clj (System/getenv "SYNTHIGY_TOKEN") :cljs nil)
+  (let [endpoint (or endpoint
+                     #?(:clj (System/getenv "SYNTHIGY_ENDPOINT") :cljs nil)
+                     (throw (err/ex-info #?(:clj "create-client requires :endpoint (or SYNTHIGY_ENDPOINT — run under `synthigy exec`)"
+                                            :cljs "create-client requires :endpoint")
+                                         {:code "NO_ENDPOINT"})))
+        env-token #?(:clj (System/getenv "SYNTHIGY_TOKEN") :cljs nil)
         supervised? #?(:clj (= "1" (System/getenv "SYNTHIGY_SUPERVISED")) :cljs false)
         provider (cond
                    token-fn {:token-fn token-fn
@@ -132,7 +138,7 @@
                    supervised? #?(:clj (auth/supervised) :cljs nil)
                    env-token (auth/static env-token)
                    :else (throw #?(:clj (auth/no-token-error)
-                                   :cljs (ex-info "create-client requires :token-fn, :token, or :client-id + :client-secret"
+                                   :cljs (err/ex-info "create-client requires :token-fn, :token, or :client-id + :client-secret"
                                                   {:code "CONFIG_ERROR"}))))]
     (merge {:endpoint endpoint
             :key-format key-format
@@ -145,6 +151,10 @@
             ;; subscription shared by all watch/watch-query.
             :mux (atom {:watches {}})}
            (cond-> {}
+             client-id (assoc :client-id client-id)
+             ;; behind a fn so a printed client map never shows the secret
+             client-secret (assoc :client-secret-fn (constantly client-secret))
+             login-store (assoc :login-store login-store)
              on-request (assoc :on-request on-request)
              on-response (assoc :on-response on-response)
              on-error (assoc :on-error on-error))
@@ -289,7 +299,7 @@
   [{:keys [ok data error]} operation]
   (if ok
     data
-    (ex-info (or (:message error) "Operation failed")
+    (err/ex-info (or (:message error) "Operation failed")
              (merge {:code (:code error)} error
                     (when operation {:operation operation})))))
 
@@ -375,7 +385,7 @@
    Mint one before a write to know a record's id up front, or to make a
    retried write idempotent — the server accepts a caller-supplied id
    as-is, and the alternative (`returning: true`) costs the full echo on
-   every write. See docs/plans/PLAN-SYNC-RETURNING-FLAG.md."
+   every write."
   []
   (let [hex (str/replace (str (random-uuid)) "-" "")
         bs  (mapv hex-byte (partition 2 hex))
@@ -384,18 +394,19 @@
     (str (apply str (repeat (max 0 pad) \1)) s)))
 
 (defn op-sync
-  "Build a sync (upsert) operation for batch use. The server answers
+  "Build a sync (upsert) operation for batch use; `data` is one record or a
+   vector of them. The server answers
    {:count n}; pass `returning` true for the written records. Mint ids with
    `new-xid` when you need them up front — that is the cheap way to know
-   what you wrote. See docs/plans/PLAN-SYNC-RETURNING-FLAG.md."
+   what you wrote."
   ([entity data] (op-sync entity data false))
   ([entity data returning]
    {:op "sync" :entity (name entity)
     :data data :returning (boolean returning)}))
 
 (defn op-stack
-  "Build a stack operation for batch use. Same `returning` contract as
-   op-sync."
+  "Build a stack operation for batch use, one record or a vector. Same
+   `returning` contract as op-sync."
   ([entity data] (op-stack entity data false))
   ([entity data returning]
    {:op "stack" :entity (name entity)
@@ -459,25 +470,33 @@
    augmentation)."
   [] {:op "runtime-model"})
 
+(defn xsql-document
+  "An XSQL operation document: a source already starting with `@` keeps its
+   verb; a bare body gets an `@<op> _q` header."
+  [source op]
+  (if (str/starts-with? (str/triml source) "@")
+    source
+    (str "@" (name op) " _q\n" source)))
+
 (defn ^:no-doc op-xsql
   "Wire operation for a generated/compiled XSQL op map `{:op :source :entity}`
    plus a params map — the batch-composable form of `synthigy.client/run-xsql`.
-   Used by generated `@batch` functions; reads ride `:selections`, sql-templates
-   the template path."
-  [{:keys [op source entity]} params]
+   Used by generated `@batch` functions."
+  [{:keys [op source]} params]
   (if (= op "sql-template")
     (cond-> {:op "sql-template" :template source :cached true}
       (seq params) (assoc :params params))
-    (cond-> {:op op :selections source}
-      entity (assoc :entity entity)
+    (cond-> {:op "xsql" :xsql (xsql-document source op)}
       (seq params) (assoc :params params))))
 
 (defn ^:no-doc op-describe
-  "Build a describe operation — XSQL program `source` → codegen IR
-   `{:operations [...]}`. Powers the `synthigy.gen` code generator; the
-   server-side parser is the XSQL compiler, so clients ship no grammar."
+  "Build a describe operation — XSQL → codegen IR `{:operations [...]}`.
+   `source` is one program, or `[{:path :source}]` with one entry per .xsql
+   file (each parsed on its own, so its @namespace stays in it)."
   [source]
-  {:op "describe" :source source})
+  (if (string? source)
+    {:op "describe" :source source}
+    {:op "describe" :sources (vec source)}))
 
 
 ;; ============================================================================
@@ -497,7 +516,7 @@
    non-empty; `operations` optionally narrows to an op subset."
   [{:keys [records operations]}]
   (when (empty? records)
-    (throw (ex-info "subscribe: records must be a non-empty seq of xid strings"
+    (throw (err/ex-info "subscribe: records must be a non-empty seq of xid strings"
                     {:code "EMPTY_RECORDS"})))
   (cond-> {:records (set (map str records))}
     (seq operations) (assoc :operations (set (map name operations)))))

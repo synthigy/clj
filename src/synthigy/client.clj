@@ -26,12 +26,14 @@
 
   Pure data helpers — op builders for `batch`, `results->data`/`ok?`,
   `compose-tree`/`compose-forest` — live in `synthigy.client.core`."
-  (:refer-clojure :exclude [sync get])
+  (:refer-clojure :exclude [sync get compile])
   (:require
+   [synthigy.client.error :as err]
    [clojure.core.async :as a]
    [clojure.string :as str]
    [synthigy.client.core :as core]
-   [synthigy.client.http :as http]))
+   [synthigy.client.http :as http]
+   [synthigy.client.login :as login]))
 
 (declare disconnect!)
 
@@ -40,12 +42,14 @@
    install it as the process-wide default — the Clojure server-restart idiom:
    the PREVIOUS client (if any) is destroyed first (`disconnect!` — its SSE
    listener stops, its watches close), then the new one replaces it. Call at
-   startup; call again to reconnect."
-  [opts]
-  (disconnect!)
-  (let [c (core/create-client opts)]
-    (alter-var-root #'core/*client* (constantly c))
-    c))
+   startup; call again to reconnect. With no opts, everything comes from the
+   environment `synthigy exec` sets up."
+  ([] (connect! {}))
+  ([opts]
+   (disconnect!)
+   (let [c (core/create-client opts)]
+     (alter-var-root #'core/*client* (constantly c))
+     c)))
 
 (defn token
   "Resolve a bearer access token via the client's provider.
@@ -86,7 +90,8 @@
   (single-result (core/op-get entity args selection) opts))
 
 (defn sync
-  "Sync (upsert) entity data — returns {:count n}.
+  "Sync (upsert) one record (a map) or many (a vector — one operation, for
+  bulk import) — returns {:count n}.
 
   Data keys accept kebab-case (normalized to snake_case). Pass
   `:returning true` for the written records; mint ids with
@@ -95,7 +100,7 @@
   (single-result (core/op-sync entity data returning) opts))
 
 (defn stack
-  "Stack data on top of current state — returns {:count n}.
+  "Stack one record or a vector of them on top of current state — returns {:count n}.
 
   Data keys accept kebab-case (normalized to snake_case). Same `:returning`
   contract as sync."
@@ -184,16 +189,6 @@
 ;; XSQL query + lint
 ;; =======================================================================
 
-(defn- xsql-document
-  "Ensure an XSQL operation DOCUMENT (STRICT wire: XSQL travels only as
-   {:op \"xsql\" :xsql <document>}). Sources already starting with `@` pass
-   through — their @verb is authoritative; bare rooted bodies get a
-   synthetic `@<op> _q` header."
-  [source op]
-  (if (clojure.string/starts-with? (clojure.string/triml source) "@")
-    source
-    (str "@" (name op) " _q\n" source)))
-
 (defn query
   "Run an XSQL query with optional ?name:type[] params. STRICT wire: sends
    the `xsql` DOCUMENT op ({:op \"xsql\" :xsql <document> :params …}) — a
@@ -201,7 +196,7 @@
    server derives verb/entity/selections/args from the document. `:op`
    defaults to \"search\" — pass :op :get for a unique-key read."
   [xsql params & {:keys [op] :or {op "search"} :as opts}]
-  (single-result (cond-> {:op "xsql" :xsql (xsql-document xsql op)}
+  (single-result (cond-> {:op "xsql" :xsql (core/xsql-document xsql op)}
                    params (assoc :params params))
                  opts))
 
@@ -234,6 +229,22 @@
                    (cond-> {:source source}
                      entity (assoc :entity (name entity))
                      op (assoc :op (name op))))))
+
+(defn compile
+  "Compile an XSQL `source` to the wire operation the engine would execute
+   (POST /compile) — same coercion as a real call, nothing runs. `params`
+   bind exactly as they would on `query`, so the map returned IS what the
+   engine receives; edit it and POST it to /data yourself."
+  [source & {:keys [op params] :or {op "search"}}]
+  (let [{:keys [ok operation error]}
+        (first (:results (http/post-json
+                          (str (http/base-url) "/compile")
+                          (cond-> {:operations [{:op "xsql"
+                                                 :xsql (core/xsql-document source op)}]}
+                            params (assoc-in [:operations 0 :params] params)))))]
+    (if ok
+      operation
+      (throw (err/ex-info (:message error) (or error {}))))))
 
 ;; =======================================================================
 ;; Account onboarding
@@ -297,6 +308,34 @@
   (http/onboard-complete {:ticket ticket}))
 
 ;; =======================================================================
+;; Browser login (OIDC authorization code + PKCE)
+;; =======================================================================
+
+(defn login-start
+  "Begin a person's login; redirect the browser to the returned :url.
+
+   redirect-uri     : your callback URL, registered on this OAuth client
+   :return-to       : handed back by `login-complete` (default \"/\")
+   :scope           : default \"openid\"
+   :public-endpoint : the browser-facing server URL, when it differs from :endpoint
+
+   Needs a confidential client (:client-id + :client-secret) and a :login-store."
+  [redirect-uri & {:as opts}]
+  (login/start (core/the-client) redirect-uri opts))
+
+(defn login-complete
+  "Exchange the callback's code; -> {:user {:xid :name :scopes} :tokens {...} :return-to ...}.
+
+   Throws :code LOGIN_STATE_UNKNOWN, LOGIN_NONCE_MISMATCH or LOGIN_EXCHANGE_FAILED."
+  [code state redirect-uri]
+  (login/complete (core/the-client) code state redirect-uri))
+
+(defn login-cancel
+  "Discard an in-flight login (the callback came back with `error`); -> {:return-to ...} or nil."
+  [state]
+  (login/cancel (core/the-client) state))
+
+;; =======================================================================
 ;; Model introspection
 ;; =======================================================================
 
@@ -332,7 +371,7 @@
                              {:op op :opts hopts}))
     (catch clojure.lang.ExceptionInfo e
       (if (= 404 (:status (ex-data e)))
-        (throw (ex-info "History unavailable — no audit provider configured on the server"
+        (throw (err/ex-info "History unavailable — no audit provider configured on the server"
                         {:code "HISTORY_UNAVAILABLE"}))
         (throw e)))))
 
@@ -737,8 +776,8 @@
    options."
   [template params & {:keys [entities] :as opts}]
   (when-not (seq entities)
-    (throw (ex-info "watch-sql-template needs :entities — a SQL template has no root entity to infer the watch interest from"
-                    {:template template})))
+    (throw (err/ex-info "watch-sql-template needs :entities — a SQL template has no root entity to infer the watch interest from"
+                    {:code "MISSING_ENTITIES" :template template})))
   (watch-xsql {:op "sql-template" :source template} params
               (-> opts
                   (dissoc :entities)

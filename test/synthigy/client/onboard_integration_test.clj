@@ -27,7 +27,7 @@
          client))
      ;; -> {:secret \"<copy into SYNTHIGY_PROVISION_CLIENT_SECRET>\"}
 
-   Onboarding no longer creates accounts (PLAN-ONBOARDING.md P1) — each test
+   Onboarding does not create accounts — each test
    creates its own account over `/data` first, with a client-minted xid and
    stamped with the client's own owner group so it lands inside the
    principal's write scope, then mints a ticket for it.
