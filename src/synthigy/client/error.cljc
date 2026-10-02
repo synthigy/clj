@@ -26,12 +26,22 @@
    "NO_TOKEN" "auth"
    "TOKEN_ERROR" "auth"
    "SILENT_TIMEOUT" "auth"
+   "USERINFO_SUB_MISMATCH" "auth"
+   "INVALID_CLIENT" "auth"
+   "INVALID_SCOPE" "auth"
+   "INVALID_AUDIENCE" "auth"
    ;; iam
    "FORBIDDEN" "iam"
    "FORBIDDEN_OP" "iam"
    "ENTITY_FORBIDDEN" "iam"
    "ENTITY_NOT_READABLE" "iam"
    "RELATION_NOT_READABLE" "iam"
+   "RELATION_FORBIDDEN" "iam"
+   "ATTRIBUTE_FORBIDDEN" "iam"
+   "ROW_FORBIDDEN" "iam"
+   "CREATE_FORBIDDEN" "iam"
+   "DELETE_FORBIDDEN" "iam"
+   "SLOT_OCCUPIED" "iam"
    ;; validation
    "NO_ENDPOINT" "validation"
    "INVALID_BODY" "validation"
@@ -90,7 +100,8 @@
    ;; internal
    "INTERNAL_ERROR" "internal"
    "OPERATION_ERROR" "internal"
-   "HTTP_ERROR" "internal"})
+   "HTTP_ERROR" "internal"
+   "USERINFO_FAILED" "internal"})
 
 (def retryable-categories #{"network" "rate_limit" "internal"})
 
@@ -98,11 +109,36 @@
   [code]
   (get categories code "internal"))
 
+(defn retryable?
+  [{:keys [code retryable]}]
+  (if (boolean? retryable)
+    retryable
+    (and (contains? categories code)
+         (contains? retryable-categories (category code)))))
+
 (defn ex-info
-  "clojure.core/ex-info, plus :category and :retryable derived from (:code data)."
+  "clojure.core/ex-info, plus :category and :retryable from (:code data); the server's own :retryable wins."
   ([message data] (ex-info message data nil))
   ([message data cause]
-   (let [cat (category (:code data))]
-     (clojure.core/ex-info message
-                           (assoc data :category cat :retryable (contains? retryable-categories cat))
-                           cause))))
+   (clojure.core/ex-info message
+                         (assoc data :category (category (:code data)) :retryable (retryable? data))
+                         cause)))
+
+(def refusal-codes
+  {"invalid_client" "INVALID_CLIENT"
+   "invalid_scope" "INVALID_SCOPE"
+   "invalid_target" "INVALID_AUDIENCE"})
+
+(defn token-refusal
+  "The ex-info for a refused /oauth/token mint, typed by its RFC 6749 / RFC 8707 error."
+  [status {:keys [error error_description] :as oauth} body]
+  (if-not (and (string? error) (seq error))
+    (ex-info (str "Token request failed: HTTP " status)
+             {:code "TOKEN_ERROR" :status status :body body})
+    (let [code (get refusal-codes error "TOKEN_ERROR")]
+      (ex-info (str "Token request refused (" status "): " error
+                    (when (and (string? error_description) (seq error_description))
+                      (str " — " error_description)))
+               (cond-> {:code code :status status :body body :details oauth}
+                 (= code "INVALID_CLIENT")
+                 (assoc :hint "check the client id and secret, and that the client is active"))))))

@@ -380,6 +380,40 @@
                                    :else " — run under `synthigy exec` (endpoint + credentials)"))
                             {:dir dir :cause (ex-message e) :cause-data (ex-data e)}))))))))
 
+(defn instant [s]
+  (try (.toInstant (java.time.OffsetDateTime/parse s)) (catch Exception _ s)))
+
+(defn warn-stale-schema!
+  "One stderr line when `<dir>/schema.json`'s deploy stamp is older than the
+   model at /.well-known/synthigy. Silent on any failure."
+  [{:keys [dir endpoint] :or {dir "xsql"}}]
+  (let [endpoint (or endpoint (System/getenv "SYNTHIGY_ENDPOINT"))
+        f        (io/file dir "schema.json")]
+    (when (and (seq endpoint) (.exists f))
+      (when-let [[local remote]
+                 (try
+                   (let [req  (-> (java.net.http.HttpRequest/newBuilder
+                                   (java.net.URI. (str (str/replace endpoint #"/$" "") "/.well-known/synthigy")))
+                                  (.timeout (java.time.Duration/ofSeconds 2))
+                                  (.build))
+                         resp (.send (-> (java.net.http.HttpClient/newBuilder)
+                                         (.connectTimeout (java.time.Duration/ofSeconds 2))
+                                         (.build))
+                                     req
+                                     (java.net.http.HttpResponse$BodyHandlers/ofString))]
+                     (when (= 200 (.statusCode resp))
+                       [(get (json/parse-string (slurp f)) "datasets")
+                        (get (json/parse-string (.body resp)) "datasets")]))
+                   (catch Exception _ nil))]
+        (let [changed (concat (for [[id at] remote
+                                    :when (not= (instant (get-in local [id "deployed-at"])) (instant at))]
+                                id)
+                              (remove #(contains? remote %) (keys local)))]
+          (when (seq changed)
+            (binding [*out* *err*]
+              (println (str "warning: " f " is stale against " endpoint " (" (count changed)
+                            " datasets changed since the pull) — re-run with :pull true")))))))))
+
 (defn generate
   "Emit source from `dir`'s .xsql: offline from a matching `ops.ir.json`, else
    via a live op:describe that also refreshes it and `<dir>/schema.json`.
@@ -387,6 +421,7 @@
   [opts]
   (let [{:keys [operations pulled?]} (load-ir opts)
         paths (emit-all operations opts)]
+    (when-not pulled? (warn-stale-schema! opts))
     (when pulled?
       ;; Editor artifact, not the deliverable — a /schema hiccup must not
       ;; fail a build whose generated source is already on disk.

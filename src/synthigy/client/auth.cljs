@@ -50,8 +50,10 @@
           {:access-token access-token
            :expires-at (+ (js/Date.now) (* expires-in 1000))})
         (p/let [body-text (.text resp)]
-          (throw (err/ex-info (str "Token request failed: HTTP " status)
-                          {:code "TOKEN_ERROR" :status status :body body-text})))))))
+          (throw (err/token-refusal status
+                                    (try (js->clj (js/JSON.parse body-text) :keywordize-keys true)
+                                         (catch :default _ nil))
+                                    body-text)))))))
 
 
 (defn- expired?

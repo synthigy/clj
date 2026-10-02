@@ -6,8 +6,9 @@
    instead of music-album-list)."
   (:require [cheshire.core :as json]
             [clojure.java.io :as io]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
-            [synthigy.gen]))
+            [synthigy.gen :as gen]))
 
 (def ^:private kebab @#'synthigy.gen/kebab)
 
@@ -57,3 +58,25 @@
                  (catch clojure.lang.ExceptionInfo e e))]
       (is (some? e))
       (is (re-find #"changed since the last pull" (ex-message e))))))
+
+(deftest warn-stale-schema-only-when-the-stamp-moved
+  (let [server (com.sun.net.httpserver.HttpServer/create (java.net.InetSocketAddress. "127.0.0.1" 0) 0)
+        body   (.getBytes "{\"datasets\":{\"A\":\"2026-09-15T09:47:15.698+02:00\",\"B\":\"2026-10-01T00:00:00Z\"}}")
+        _      (.createContext server "/.well-known/synthigy"
+                               (reify com.sun.net.httpserver.HttpHandler
+                                 (handle [_ ex]
+                                   (.sendResponseHeaders ex 200 (alength body))
+                                   (with-open [o (.getResponseBody ex)] (.write o body)))))
+        _      (.start server)
+        endpoint (str "http://127.0.0.1:" (.getPort (.getAddress server)))
+        dir    (str (java.nio.file.Files/createTempDirectory "synthigy-stale" (make-array java.nio.file.attribute.FileAttribute 0)))
+        run    (fn [ep] (let [w (java.io.StringWriter.)]
+                          (binding [*err* w] (gen/warn-stale-schema! {:dir dir :endpoint ep}))
+                          (str w)))]
+    (try
+      (spit (str dir "/schema.json") "{\"datasets\":{\"A\":{\"deployed-at\":\"2026-09-15T07:47:15.698Z\"},\"B\":{\"deployed-at\":\"2026-10-01T00:00:00Z\"}}}")
+      (is (= "" (run endpoint)))
+      (spit (str dir "/schema.json") "{\"datasets\":{\"A\":{\"deployed-at\":\"2026-09-15T07:47:15.698Z\"}}}")
+      (is (str/includes? (run endpoint) "stale"))
+      (is (= "" (run "")))
+      (finally (.stop server 0)))))

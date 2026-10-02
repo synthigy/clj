@@ -216,7 +216,10 @@ assume 3600 seconds.
 ```
 
 SDK builds an `auth/oauth` provider, caches tokens per-audience in a
-closure-local atom, refreshes 30s before expiry.
+closure-local atom, refreshes 30s before expiry. A refused mint is
+`INVALID_CLIENT` (wrong id or secret, inactive client), `INVALID_SCOPE`, or
+`INVALID_AUDIENCE` (the client isn't linked to the API), else `TOKEN_ERROR`;
+the message carries the server's `error_description`.
 
 Add `:audience` (JVM default: `$SYNTHIGY_AUDIENCE`) to bind one audience to
 every mint this client makes. The platform's audience model is **opt-in by
@@ -532,7 +535,7 @@ table as the Go, JS, Python and PHP SDKs:
 | `conflict` | Constraint violation | no |
 | `rate_limit` | Too many requests, `TIMEOUT` | yes |
 | `network` | No HTTP response | yes |
-| `internal` | Unexpected server error; also any code the table doesn't know | yes |
+| `internal` | Unexpected server error; also any code the table doesn't know | yes, except an unknown code the server didn't mark retryable |
 
 ```clojure
 (try (c/search :movie nil [:title])
@@ -549,6 +552,7 @@ Common codes:
 | `TRANSPORT_ERROR` | Network error — no HTTP response |
 | `HTTP_ERROR` | Non-2xx response; `:status` carries the code |
 | `UNAUTHORIZED` | Second 401 after invalidate-retry |
+| `INVALID_CLIENT` | Token mint refused: wrong client id or secret, or inactive client |
 | `UNKNOWN_ENTITY` | Entity name not in deployed model |
 | Server-issued codes | Whatever the `/data` endpoint returned |
 

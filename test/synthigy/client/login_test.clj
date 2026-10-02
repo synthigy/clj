@@ -150,4 +150,21 @@
   (testing "memory store expires"
     (let [{:keys [put-fn take-fn]} (login/memory-login-store {:ttl-ms 1})]
       (put-fn "s" {:created-at (- (System/currentTimeMillis) 10)})
-      (is (nil? (take-fn "s"))))))
+      (is (nil? (take-fn "s")))))
+  (testing "the default keeps a 9-minute login — the server allows 8"
+    (let [{:keys [put-fn take-fn]} (login/memory-login-store)]
+      (put-fn "slow" {:created-at (- (System/currentTimeMillis) (* 9 60 1000))})
+      (is (some? (take-fn "slow"))))))
+
+(deftest expired-login-refused-even-when-the-store-kept-it
+  (let [old {:code-verifier "v" :nonce "n" :return-to "/back"
+             :created-at (- (System/currentTimeMillis) login/login-ttl-ms 1000)}
+        kept (atom {"done" old "cancelled" old})
+        forever {:put-fn (fn [s l] (swap! kept assoc s l))
+                 :take-fn (fn [s] (let [[m] (swap-vals! kept dissoc s)] (get m s)))}]
+    (with-stub [srv (ok-exchange (constantly "n"))]
+      (binding [core/*client* (make-client (:endpoint srv) :login-store forever)]
+        (is (= "LOGIN_STATE_UNKNOWN"
+               (:code (ex-data (is (thrown? Exception (client/login-complete "c" "done" "http://app/cb")))))))
+        (is (nil? (client/login-cancel "cancelled")))
+        (is (empty? @(:requests srv)) "an expired login never reaches the IdP")))))

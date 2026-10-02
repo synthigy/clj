@@ -39,7 +39,7 @@
 (defn- execute
   [operations opts]
   (let [body (core/build-request (core/the-client) operations opts)]
-    (p/let [response (http/request body)]
+    (p/let [response (http/request body (:timeout-ms opts))]
       (:results response))))
 
 (defn- single-result

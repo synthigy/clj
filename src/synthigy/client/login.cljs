@@ -10,7 +10,8 @@
 
 (def pending-prefix "synthigy.login:")
 
-(def pending-ttl-ms (* 5 60 1000))
+;; must exceed the server's 8-minute login window, or slow logins fail LOGIN_STATE_UNKNOWN
+(def pending-ttl-ms (* 10 60 1000))
 
 (def message-source "synthigy-login")
 

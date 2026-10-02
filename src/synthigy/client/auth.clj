@@ -50,8 +50,10 @@
                     :throw false})
         status (:status response)]
     (when-not (<= 200 status 299)
-      (throw (err/ex-info (str "Token request failed: HTTP " status)
-                      {:code "TOKEN_ERROR" :status status :body (:body response)})))
+      (throw (err/token-refusal status
+                                (try (json/read-str (:body response) {:key-fn keyword})
+                                     (catch Exception _ nil))
+                                (:body response))))
     (let [body (json/read-str (:body response) {:key-fn keyword})
           {:keys [access_token expires_in]} body]
       {:access-token access_token

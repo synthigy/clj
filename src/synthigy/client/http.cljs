@@ -171,14 +171,15 @@
 (defn request
   "POST to /data with the given body (transit). Returns a promise of the
    parsed response — temporal values come back as real js/Date."
-  [body]
-  (let [client (core/the-client)]
-    (p/let [resp (authed :post (str (:endpoint client) "/data")
-                         {:body (transit/write tw body)
-                          :headers {"Content-Type" "application/transit+json"
-                                    "Accept" "application/transit+json"}
-                          :timeout-ms (:request-timeout client)})]
-      (ensure-2xx resp "Request"))))
+  ([body] (request body nil))
+  ([body timeout-ms]
+   (let [client (core/the-client)]
+     (p/let [resp (authed :post (str (:endpoint client) "/data")
+                          {:body (transit/write tw body)
+                           :headers {"Content-Type" "application/transit+json"
+                                     "Accept" "application/transit+json"}
+                           :timeout-ms (or timeout-ms (:request-timeout client))})]
+       (ensure-2xx resp "Request")))))
 
 
 (defn get-json

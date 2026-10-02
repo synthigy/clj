@@ -3,6 +3,33 @@
 All notable changes to `com.synthigy/sdk` (Clojars). Follows
 [semver](https://semver.org). Pre-1.0: breaking changes can land on minor bumps.
 
+## 0.2.1
+
+### Fixed
+- **A login may take 10 minutes, not 5** (JVM `memory-login-store` default,
+  now `login/login-ttl-ms`, and the CLJS pending login). Synthigy's login page
+  allows 8, so a user who took 5–8 minutes logged in there and then failed the
+  callback with `LOGIN_STATE_UNKNOWN`. `login/default-ttl-ms` is gone.
+- **`login-complete` and `login-cancel` refuse a login older than that
+  themselves.** Expiry used to live only in the store, so a custom store that
+  never expired accepted a login of any age.
+- **Permission denials are `iam`, not retryable `internal`.**
+  `RELATION_FORBIDDEN`, `ATTRIBUTE_FORBIDDEN`, `ROW_FORBIDDEN`,
+  `CREATE_FORBIDDEN`, `DELETE_FORBIDDEN` and `SLOT_OCCUPIED` were missing from
+  the code table, so a denied relation read came back as a retryable server
+  error.
+- **A code the SDK doesn't know is no longer retryable.** It stays category
+  `internal`, but `:retryable` is true only when the server marks the error
+  retryable (it does for transient database failures) or the code is a known
+  `network`/`rate_limit`/`internal` one. The server's `:retryable` on a
+  per-op error used to be overwritten.
+- **A refused token mint says why** (JVM and CLJS). `invalid_client` →
+  `INVALID_CLIENT` (with a `:hint` to check the client id and secret),
+  `invalid_scope` → `INVALID_SCOPE`, `invalid_target` → `INVALID_AUDIENCE`;
+  other refusals stay `TOKEN_ERROR`. The message carries the server's
+  `error_description`, `:details` the decoded OAuth error.
+- `USERINFO_SUB_MISMATCH` is category `auth`, no longer retryable `internal`.
+
 ## 0.2.0
 
 ### Added

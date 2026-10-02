@@ -22,7 +22,8 @@
    [java.util Base64]))
 
 
-(def default-ttl-ms (* 5 60 1000))
+;; must exceed the server's 8-minute login window, or slow logins fail LOGIN_STATE_UNKNOWN
+(def login-ttl-ms (* 10 60 1000))
 
 (defonce random (SecureRandom.))
 
@@ -75,7 +76,7 @@
 (defn memory-login-store
   "In-flight logins in an atom — SINGLE PROCESS ONLY; behind a load balancer use a shared store."
   ([] (memory-login-store {}))
-  ([{:keys [ttl-ms] :or {ttl-ms default-ttl-ms}}]
+  ([{:keys [ttl-ms] :or {ttl-ms login-ttl-ms}}]
    (let [pending (atom {})
          live? #(> (:created-at %) (- (System/currentTimeMillis) ttl-ms))]
      {:put-fn (fn [state login]
@@ -90,6 +91,13 @@
 (defn store
   [client]
   (or (:login-store client) (rejecting-login-store)))
+
+(defn take-pending
+  "Take a pending login, refusing one older than login-ttl-ms even when the store kept it."
+  [client state]
+  (when-let [pending (when state ((:take-fn (store client)) state))]
+    (when (> (or (:created-at pending) 0) (- (System/currentTimeMillis) login-ttl-ms))
+      pending)))
 
 (defn require-confidential
   [{:keys [client-id client-secret-fn]}]
@@ -139,7 +147,7 @@
 (defn complete
   [client code state redirect-uri]
   (require-confidential client)
-  (let [pending (when state ((:take-fn (store client)) state))]
+  (let [pending (take-pending client state)]
     (when-not pending
       (throw (err/ex-info
               (str "unknown or expired login state: the store never saw it, it "
@@ -185,5 +193,5 @@
 
 (defn cancel
   [client state]
-  (when-let [pending (when state ((:take-fn (store client)) state))]
+  (when-let [pending (take-pending client state)]
     {:return-to (:return-to pending)}))
