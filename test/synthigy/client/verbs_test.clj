@@ -37,6 +37,16 @@
       (is (= "u-1" (:acting_as b))))
     (is (not (contains? (core/build-request {} [{:op "search"}] {}) :acting_as)))))
 
+(deftest whoami-sends-the-op-and-acting-as
+  (let [me {:xid "x-bgates" :name "bgates" :active true :superuser false
+            :roles ["Viewer"] :groups [] :client {:id "viewer" :trusted true}}
+        result (atom nil)
+        body (with-capture {:results [{:ok true :data me}]}
+               #(reset! result (client/whoami :acting-as "x-bgates")))]
+    (is (= me @result))
+    (is (= [{:op "whoami"}] (:operations body)))
+    (is (= "x-bgates" (:acting_as body)))))
+
 ;; ── read verbs ─────────────────────────────────────────────────────────────
 
 (deftest search-wire-shape-and-empty

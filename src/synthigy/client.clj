@@ -360,6 +360,11 @@
   [& {:as opts}]
   (single-result (core/op-runtime-model) opts))
 
+(defn whoami
+  "Who a call runs as, after :acting-as: xid, name, active, superuser, roles, groups, and :client {:id :trusted}."
+  [& {:as opts}]
+  (single-result (core/op-whoami) opts))
+
 ;; =======================================================================
 ;; History — temporal query surface over the audit plug (/history)
 ;; =======================================================================

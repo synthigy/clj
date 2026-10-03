@@ -269,6 +269,11 @@
   [& {:as opts}]
   (single-result (core/op-runtime-model) opts))
 
+(defn whoami
+  "Who a call runs as, after :acting-as: xid, name, active, superuser, roles, groups, and :client {:id :trusted}. Returns a Promise."
+  [& {:as opts}]
+  (single-result (core/op-whoami) opts))
+
 ;; =======================================================================
 ;; SSE listener — returns a 0-arg `stop` fn (does NOT block)
 ;; =======================================================================

@@ -465,6 +465,10 @@
   "Build a deployed-model operation (raw ERD model as deployed)."
   [] {:op "deployed-model"})
 
+(defn op-whoami
+  "Build a whoami operation (who the request runs as)."
+  [] {:op "whoami"})
+
 (defn op-runtime-model
   "Build a runtime-model operation (deployed model + identity/audit/ref
    augmentation)."

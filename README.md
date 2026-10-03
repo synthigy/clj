@@ -387,7 +387,8 @@ Every op returns the data or throws `ExceptionInfo`, and takes the kwargs
 | `batch` | Several operations in one request |
 
 Also available: `slice`/`purge`, `search-tree`/`get-tree`,
-`lint`/`compile`, `deployed-model`/`runtime-model`, and the `history-*`
+`lint`/`compile`, `deployed-model`/`runtime-model`, `whoami` (who a call runs
+as — roles, superuser, whether this client may act as users), and the `history-*`
 temporal ops (`get-at`, `events`, `diff`, `timeline`, `since`) — see their
 docstrings.
 
