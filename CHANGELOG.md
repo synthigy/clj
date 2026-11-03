@@ -3,6 +3,52 @@
 All notable changes to `com.synthigy/sdk` (Clojars). Follows
 [semver](https://semver.org). Pre-1.0: breaking changes can land on minor bumps.
 
+## 0.2.3
+
+Needs engine v0.4.1 or newer for files.
+
+### Added
+- **`synthigy.client.files`** (JVM and CLJS), the same calls as the JS SDK's
+  `client.files`: `put` (a path creates or replaces, `{:name n}` is a file in no
+  folder), `download` (`:range`, `:if-none-match`, kept `:version`, `:as`), `info`,
+  `list` (`{:files :folders}`), `search` (`GET /files/search`: folders and files by
+  path, `{:results :truncated}`), `delete` (a file or an empty folder), `url`
+  (`/files/<xid>` or `/files/path/…`, no request), `move`, `folder` (a path with
+  every missing folder above it, and its `public`/`cache`), `share`, `unshare`,
+  `access`, `versions`, `restore` and `serve` (a ring response on the JVM, a
+  `js/Response` in CLJS); CLJS adds `object-url`. A file is a path, an xid or the
+  file; a folder is a path ending in `/`, an xid or the folder; paths go to the
+  engine as `?path=`. CLJS calls return Promises; bodies are a `Blob`,
+  `ArrayBuffer`, `Uint8Array` or string. Needs an engine with the files module.
+- Error categories for the files codes: `FILE_NOT_FOUND`, `FOLDER_NOT_FOUND`,
+  `VERSION_EXPIRED`, `AUDIT_UNAVAILABLE` and `FILES_UNAVAILABLE` → `not_found`;
+  `FILE_NAME_TAKEN`, `FILE_CHANGED`, `FILE_NOT_READY`, `FOLDER_NAME_TAKEN`,
+  `FOLDER_NOT_EMPTY` and `FOLDER_CYCLE` → `conflict`; `NAME_REQUIRED`,
+  `INVALID_NAME`, `INVALID_ACCESS`, `FILE_TOO_LARGE`, `UNSUPPORTED_MEDIA_TYPE` and
+  `RANGE_NOT_SATISFIABLE` → `validation`.
+
+### Fixed
+- **A closed live query stays closed** (JVM and CLJS). Closing a `watch-query` /
+  `watch-xsql` with `:track-rows` while its refetch was in flight let the refetch
+  re-register the watch's interest without a channel. The JVM multiplexer then threw on
+  every matching event and the watchers after it stopped receiving. A closed watch now
+  ignores a late refetch, re-pointing an unregistered watch does nothing, and dispatch
+  skips an entry without a channel.
+
+### Changed
+- Error categories for `INVALID_PATH`, `INVALID_SETTINGS`, `INVALID_QUERY`,
+  `METHOD_NOT_ALLOWED`, `INVALID_SLICE`, `NOT_FOUND` and `OPERATION_FAILED`, as in JS.
+- `UNKNOWN_TREE_RELATION` (the engine refuses an `on` of a tree op that is not a tree relation of
+  the entity) → `validation`.
+- Error categories for the deploy checks: `SYSTEM_DATASET_ENGINE_OWNED` and
+  `SYSTEM_ENTITY_ALTERED` → `iam` (a superuser may); `ENTITY_NAME_CONFLICT`,
+  `FIELD_KEY_CONFLICT` and `IMMUTABLE_VERSION_ALTERED` → `validation`. They used to
+  fall back to `internal`.
+- More codes categorized: `ENGINE_OWNED` (a meta-model row or field only deploy and
+  recall write) → `iam`; `SYSTEM_ENTITY_RLS`, `RLS_GUARD_BROKEN` and
+  `VERSION_NAME_TAKEN` → `validation`; `MODEL_BUSY` (another deploy, recall or destroy
+  is running; retry when it finishes) → `conflict`.
+
 ## 0.2.2
 
 ### Added

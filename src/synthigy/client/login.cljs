@@ -25,6 +25,7 @@
 (defonce state
   (atom {:config nil
          :tokens nil
+         :id-token-hint nil
          :user nil
          :expires-at nil
          :renewal nil
@@ -85,7 +86,7 @@
                       {:code "CONFIG_ERROR"}))))
 
 (defn configure!
-  "Set :endpoint, :client-id, :redirect-uri and optional :silent-redirect-uri, :post-logout-redirect-uri, :scope, :audience, :load-user-info?."
+  "Set :endpoint, :client-id, :redirect-uri and optional :silent-redirect-uri, :post-logout-redirect-uri, :scope, :audience, :load-user-info?, :expiring-seconds."
   [{:keys [endpoint client-id redirect-uri] :as opts}]
   (when-not (and endpoint client-id redirect-uri)
     (throw (err/ex-info "login needs :endpoint, :client-id and :redirect-uri"
@@ -102,6 +103,13 @@
 (defn token [] (get-in @state [:tokens :access_token]))
 
 (defn user [] (:user @state))
+
+(defn expires-at [] (:expires-at @state))
+
+(defn renewal
+  "The renewal in flight as a promise, or nil."
+  []
+  (:renewal @state))
 
 
 (defn authorize-url
@@ -132,9 +140,53 @@
       {:state state
        :code code
        :error error
-       :error-description (.get q "error_description")})))
+       :error-description (.get q "error_description")
+       :iss (.get q "iss")})))
 
 (defn callback? [] (some? (callback-params js/location.href)))
+
+(defn callback-at
+  "The authorization response at `href` when `href` is the redirect URI, else nil."
+  [href redirect-uri]
+  (try
+    (let [u (js/URL. href)
+          r (js/URL. redirect-uri)]
+      (when (and (= (.-origin u) (.-origin r))
+                 (= (.-pathname u) (.-pathname r)))
+        (callback-params href)))
+    (catch :default _ nil)))
+
+(defn poll-callback
+  "Resolves the response once `read-href` reaches `redirect-uri`; rejects when `closed?` turns true or after `timeout-ms`."
+  [{:keys [read-href closed? redirect-uri interval-ms timeout-ms timeout-code ignore-state wake signal]
+    :or {closed? (constantly false) interval-ms 250 timeout-code "LOGIN_TIMEOUT"}}]
+  (p/create
+   (fn [resolve reject]
+     (let [cleanup (atom nil)
+           check (fn []
+                   (let [params (try (callback-at (read-href) redirect-uri)
+                                     (catch :default _ nil))]
+                     (cond
+                       (and params (not= ignore-state (:state params)))
+                       (do (@cleanup) (resolve params))
+
+                       (try (closed?) (catch :default _ false))
+                       (do (@cleanup)
+                           (reject (err/ex-info "the sign-in window was closed" {:code "POPUP_CLOSED"}))))))
+           interval (js/setInterval check interval-ms)
+           timer (js/setTimeout
+                  (fn []
+                    (@cleanup)
+                    (reject (err/ex-info "no authorization response in time" {:code timeout-code})))
+                  timeout-ms)]
+       (reset! cleanup
+               (fn []
+                 (js/clearInterval interval)
+                 (js/clearTimeout timer)
+                 (some-> wake (.removeEventListener "focus" check))))
+       (some-> wake (.addEventListener "focus" check))
+       (some-> signal (.addEventListener "abort" #(@cleanup)))
+       (check)))))
 
 (defn start-request
   "PKCE pair, state and nonce for one authorize round trip."
@@ -212,7 +264,7 @@
                     (emit! :access-token-expiring nil)
                     (when automatic-silent-renew?
                       (p/catch (renew!) (fn [_] nil))))
-                  (max 0 (- expires-at (* expiring-seconds 1000) now)))
+                  (max 0 (- expires-at (min (* expiring-seconds 1000) (quot (- expires-at now) 2)) now)))
         expired (js/setTimeout #(emit! :access-token-expired nil)
                                (max 0 (- expires-at now)))]
     (swap! state assoc :timers [expiring expired])))
@@ -247,7 +299,7 @@
                             {:code "USERINFO_SUB_MISMATCH"})))
       (let [user (merge (into {} claims) (into {} info))
             expires-at (+ (js/Date.now) (* 1000 (or (:expires_in tokens) 300)))]
-        (swap! state assoc :tokens tokens :user user :expires-at expires-at)
+        (swap! state assoc :tokens tokens :user user :expires-at expires-at :id-token-hint (:id_token tokens))
         (schedule! expires-at)
         (emit! :user-loaded user)
         user))))
@@ -255,6 +307,41 @@
 (defn authorization-error
   [{:keys [error error-description]}]
   (err/ex-info (or error-description error) {:code error}))
+
+(defn discovery
+  "The engine's OIDC discovery document, fetched once; nil when unreachable."
+  [{:keys [endpoint]}]
+  (let [cached (:discovery @state)]
+    (if (= endpoint (:endpoint cached))
+      (:document cached)
+      (let [document (-> (p/let [resp (js/fetch (str endpoint "/.well-known/openid-configuration")
+                                                #js {:credentials "omit"
+                                                     :headers #js {"Accept" "application/json"}})
+                                 text (.text resp)]
+                           (when (.-ok resp) (->clj (js/JSON.parse text))))
+                         (p/catch (fn [_]
+                                    (swap! state dissoc :discovery)
+                                    nil)))]
+        (swap! state assoc :discovery {:endpoint endpoint :document document})
+        document))))
+
+(defn check-response
+  "Rejects a response whose state is foreign or whose iss is not the engine's (RFC 9207)."
+  [cfg request {:keys [iss] :as params}]
+  (if (not= (:state request) (:state params))
+    (p/rejected (err/ex-info "authorization response carries a foreign state"
+                             {:code "LOGIN_STATE_UNKNOWN"}))
+    (p/let [document (discovery cfg)
+            issuer (or (:issuer document) (:endpoint cfg))]
+      (cond
+        (not (str/blank? iss))
+        (when (not= iss issuer)
+          (throw (err/ex-info (str "authorization response came from " iss ", not " issuer)
+                              {:code "LOGIN_ISSUER_MISMATCH"})))
+
+        (:authorization_response_iss_parameter_supported document)
+        (throw (err/ex-info "authorization response carries no iss" {:code "LOGIN_ISSUER_MISMATCH"})))
+      params)))
 
 
 (defn login-start
@@ -277,11 +364,10 @@
         (p/rejected (err/ex-info "unknown or expired login state: already consumed, timed out, or started in another tab"
                              {:code "LOGIN_STATE_UNKNOWN"}))
 
-        (nil? code)
-        (p/rejected (authorization-error params))
-
         :else
-        (p/let [tokens (exchange (config) code pending)
+        (p/let [_ (check-response (config) {:state state} params)
+                _ (when-not code (throw (authorization-error params)))
+                tokens (exchange (config) code pending)
                 user (accept! tokens (:nonce pending))]
           {:user user :return-to (:return-to pending)})))
     (p/resolved nil)))
@@ -298,36 +384,34 @@
 (defn silent-frame
   [cfg request]
   (let [frame (js/document.createElement "iframe")
-        origin (.-origin (js/URL. (:silent-redirect-uri cfg)))]
+        redirect-uri (:silent-redirect-uri cfg)
+        origin (.-origin (js/URL. redirect-uri))
+        control (js/AbortController.)
+        signal (.-signal control)
+        by-message (p/create
+                    (fn [resolve _]
+                      (js/window.addEventListener
+                       "message"
+                       (fn [^js e]
+                         (let [data (.-data e)]
+                           (when (and (= origin (.-origin e))
+                                      (identical? (.-source e) (.-contentWindow frame))
+                                      (= message-source (some-> data (unchecked-get "source"))))
+                             (resolve (callback-params (unchecked-get data "url"))))))
+                       #js {:signal signal})))
+        by-poll (poll-callback {:read-href #(.. frame -contentWindow -location -href)
+                                :redirect-uri redirect-uri
+                                :interval-ms 100
+                                :timeout-ms (:silent-timeout-ms cfg)
+                                :timeout-code "SILENT_TIMEOUT"
+                                :signal signal})]
     (set! (.. frame -style -cssText) "position:absolute;width:0;height:0;border:0;visibility:hidden")
-    (p/create
-     (fn [resolve reject]
-       (let [cleanup (atom nil)
-             on-message
-             (fn [^js e]
-               (let [data (.-data e)]
-                 (when (and (= origin (.-origin e))
-                            (identical? (.-source e) (.-contentWindow frame))
-                            (= message-source (some-> data (unchecked-get "source"))))
-                   (@cleanup)
-                   (let [params (callback-params (unchecked-get data "url"))]
-                     (if (= (:state request) (:state params))
-                       (resolve params)
-                       (reject (err/ex-info "silent renew answered with a foreign state"
-                                        {:code "LOGIN_STATE_UNKNOWN"})))))))
-             timer (js/setTimeout
-                    (fn []
-                      (@cleanup)
-                      (reject (err/ex-info "silent renew timed out" {:code "SILENT_TIMEOUT"})))
-                    (:silent-timeout-ms cfg))]
-         (reset! cleanup
-                 (fn []
-                   (js/clearTimeout timer)
-                   (js/window.removeEventListener "message" on-message)
-                   (.remove frame)))
-         (js/window.addEventListener "message" on-message)
-         (set! (.-src frame) (authorize-url cfg request))
-         (js/document.body.appendChild frame))))))
+    (set! (.-src frame) (authorize-url cfg request))
+    (js/document.body.appendChild frame)
+    (p/finally (p/race [by-message by-poll])
+               (fn [_ _]
+                 (.abort control)
+                 (.remove frame)))))
 
 (defn renew!
   "Silent renew through a hidden iframe with prompt=none; resolves the user, one renewal at a time."
@@ -336,7 +420,8 @@
       (let [cfg (config)
             renewal
             (-> (p/let [request (start-request (:silent-redirect-uri cfg) "none")
-                        {:keys [code] :as params} (silent-frame cfg request)]
+                        params (silent-frame cfg request)
+                        {:keys [code]} (check-response cfg request params)]
                   (if code
                     (p/let [tokens (exchange cfg code request)]
                       (accept! tokens (:nonce request)))
@@ -347,6 +432,60 @@
                 (p/finally (fn [_ _] (swap! state assoc :renewal nil))))]
         (swap! state assoc :renewal renewal)
         renewal)))
+
+(def popup-features "popup,width=480,height=640")
+
+;; the code row lives 8 minutes (authorization_code.clj)
+(def popup-timeout-ms (* 8 60 1000))
+
+(def interaction-errors
+  #{"login_required" "interaction_required" "consent_required" "account_selection_required"})
+
+(defn popup-leg
+  [cfg ^js popup prompt deadline ignore-state]
+  (p/let [request (start-request (:redirect-uri cfg) prompt)
+          _ (set! (.. popup -location -href) (authorize-url cfg request))
+          params (poll-callback {:read-href #(.. popup -location -href)
+                                 :closed? #(.-closed popup)
+                                 :redirect-uri (:redirect-uri cfg)
+                                 :timeout-ms (max 0 (- deadline (js/Date.now)))
+                                 :ignore-state ignore-state
+                                 :wake js/window})
+          params (check-response cfg request params)]
+    {:request request :params params}))
+
+(defn popup-flow
+  [cfg popup]
+  (let [deadline (+ (js/Date.now) popup-timeout-ms)]
+    (p/let [first-leg (popup-leg cfg popup "none" deadline nil)
+            {:keys [request params]} (if (contains? interaction-errors (get-in first-leg [:params :error]))
+                                       (popup-leg cfg popup nil deadline (get-in first-leg [:request :state]))
+                                       first-leg)]
+      (if-let [code (:code params)]
+        (p/let [tokens (exchange cfg code request)]
+          (accept! tokens (:nonce request)))
+        (throw (authorization-error params))))))
+
+(defn login-popup!
+  "Sign in through a popup without navigating the page; call it synchronously from a click handler."
+  []
+  (if-let [{:keys [^js popup result]} (:popup @state)]
+    (do (try (.focus popup) (catch :default _ nil))
+        result)
+    (let [cfg (config)
+          popup (js/window.open "about:blank" (str "synthigy-login-" (random-token 8)) popup-features)]
+      (if-not popup
+        (p/rejected (err/ex-info "the browser blocked the sign-in window" {:code "POPUP_BLOCKED"}))
+        (let [result (-> (popup-flow cfg popup)
+                         (p/catch (fn [e]
+                                    (if (= "POPUP_CLOSED" (:code (ex-data e)))
+                                      (p/catch (renew!) (fn [_] (throw e)))
+                                      (throw e))))
+                         (p/finally (fn [_ _]
+                                      (try (.close popup) (catch :default _ nil))
+                                      (swap! state dissoc :popup))))]
+          (swap! state assoc :popup {:popup popup :result result})
+          result)))))
 
 (defn silent-callback!
   "Call first thing on the silent redirect page; true when this window was a renewal iframe and has answered it."
@@ -360,21 +499,51 @@
     false))
 
 
+(defn id-token-hint
+  "The last id_token this page received; it outlives an expiry so a later logout can still name the session."
+  []
+  (or (:id-token-hint @state) (get-in @state [:tokens :id_token])))
+
 (defn remove-user!
-  "Forget the tokens locally without ending the server session."
+  "Forget the tokens locally without ending the server session; the logout hint stays."
   []
   (clear-timers!)
   (swap! state assoc :tokens nil :user nil :expires-at nil)
   (emit! :user-unloaded nil))
 
+(defn logout-background!
+  "End the server session over CORS without navigating, then forget the tokens locally; the hint goes only once the engine answered."
+  []
+  (let [{:keys [endpoint client-id]} (config)
+        hint (id-token-hint)
+        form (js/URLSearchParams.)]
+    (.append form "client_id" client-id)
+    (when hint (.append form "id_token_hint" hint))
+    (-> (if-not hint
+          (p/rejected (err/ex-info "no id_token on this page names a session to end"
+                                   {:code "LOGOUT_NO_HINT"}))
+          (p/let [resp (js/fetch (str endpoint "/oauth/logout")
+                                 #js {:method "POST"
+                                      :credentials "omit"
+                                      :headers #js {"Content-Type" "application/x-www-form-urlencoded"}
+                                      :body (.toString form)})]
+            (when-not (.-ok resp)
+              (throw (err/ex-info (str "logout failed (" (.-status resp) ")")
+                                  {:code "LOGOUT_FAILED" :status (.-status resp)})))
+            (swap! state assoc :id-token-hint nil)
+            nil))
+        (p/finally (fn [_ _] (remove-user!))))))
+
 (defn logout!
   "End the server session and redirect to :post-logout-redirect-uri."
   []
-  (let [{:keys [endpoint post-logout-redirect-uri]} (config)
-        id-token (get-in @state [:tokens :id_token])
+  (let [{:keys [endpoint client-id post-logout-redirect-uri]} (config)
+        hint (id-token-hint)
         params (js/URLSearchParams.)]
-    (when id-token (.append params "id_token_hint" id-token))
+    (.append params "client_id" client-id)
+    (when hint (.append params "id_token_hint" hint))
     (.append params "post_logout_redirect_uri" post-logout-redirect-uri)
+    (swap! state assoc :id-token-hint nil)
     (remove-user!)
     (js/location.assign (str endpoint "/oauth/logout?" (.toString params)))))
 
@@ -387,7 +556,9 @@
                     (p/handle renewal (fn [_ _] (token)))
                     (token)))
         invalidate (fn []
-                     (p/catch (p/do (renew!)) (fn [_] nil))
+                     ;; never after a sign-out or expiry: a live engine session would sign the user back in
+                     (when (token)
+                       (p/catch (p/do (renew!)) (fn [_] nil)))
                      nil)]
     {:token-fn (fn ([] (current)) ([_audience] (current)))
      :invalidate-fn (fn ([] (invalidate)) ([_audience] (invalidate)))}))

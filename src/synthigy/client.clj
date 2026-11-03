@@ -516,7 +516,7 @@
 
 (defn- mux-dispatch [mux event]
   (doseq [{:keys [interest ch]} (vals (:watches @mux))]
-    (when (core/event-matches? interest event)
+    (when (and ch (core/event-matches? interest event))
       ;; Non-blocking — a full/slow watcher must never stall this loop.
       (a/put! ch event))))
 
@@ -604,10 +604,16 @@
     (mux-flush! mux)
     (mux-maybe-stop! mux)))
 
-(defn- mux-set-interest! [id interest]
-  (let [mux (:mux (core/the-client))]
-    (swap! mux assoc-in [:watches id :interest] interest)
-    (mux-flush! mux)))
+(defn- mux-set-interest!
+  "Re-point a live watcher's interest; a no-op once it is unregistered."
+  [id interest]
+  (let [mux (:mux (core/the-client))
+        [old new] (swap-vals! mux (fn [m]
+                                    (cond-> m
+                                      (get-in m [:watches id])
+                                      (assoc-in [:watches id :interest] interest))))]
+    (when-not (identical? old new)
+      (mux-flush! mux))))
 
 ;; =======================================================================
 ;; Watch — ergonomic SSE subscription (TS-SDK parity: client.watch)
@@ -696,12 +702,16 @@
                      :or {debounce-ms 80 entity-track true}}]
   (let [value (atom (run))
         gen   (atom 0)
+        closed? (atom false)
         poke! (fn [] (debounced-refetch! gen debounce-ms
-                       #(try (reset! value (run))
-                             (catch Throwable e
-                               (binding [*out* *err*]
-                                 (println "synthigy.client watch refetch failed:"
-                                          (ex-message e)))))))
+                       #(when-not @closed?
+                          (try (let [rows (run)]
+                                 ;; a refetch in flight when the watch closed must not repaint it
+                                 (when-not @closed? (reset! value rows)))
+                               (catch Throwable e
+                                 (binding [*out* *err*]
+                                   (println "synthigy.client watch refetch failed:"
+                                            (ex-message e))))))))
         base-entities (or interest-entities (when entity-track [entity-name]))
         interest-for (fn [rows]
                        (cond-> {}
@@ -714,7 +724,11 @@
     (when track-rows
       (add-watch value ::track-rows
                  (fn [_ _ _ rows] (mux-set-interest! id (interest-for rows)))))
-    (alter-meta! value assoc :close #(mux-unregister! id) :watch-id id)
+    (alter-meta! value assoc
+                 :close #(do (reset! closed? true)
+                             (remove-watch value ::track-rows)
+                             (mux-unregister! id))
+                 :watch-id id)
     value))
 
 (defn watch-query

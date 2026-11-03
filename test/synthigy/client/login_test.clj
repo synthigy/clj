@@ -1,4 +1,5 @@
 (ns synthigy.client.login-test
+  {:clj-kondo/config '{:lint-as {synthigy.client.login-test/with-stub clojure.core/let}}}
   (:require [babashka.json :as json]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]

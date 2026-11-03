@@ -26,7 +26,7 @@ side by side under `src/synthigy/client/`:
 From Clojars — `deps.edn`:
 
 ```clojure
-{:deps {com.synthigy/sdk {:mvn/version "0.1.0"}}}
+{:deps {com.synthigy/sdk {:mvn/version "0.2.3"}}}
 ```
 
 Leiningen:
@@ -92,6 +92,7 @@ the raw wire keys, or `"camel"`.
 | `synthigy.client` | `connect!` + XSQL `query`/`sql-template`, writes `sync` `stack` `delete`, `batch`, `watch-sql-template`/`watch`/`close-watch!`, `history-*`, `schema`/`lint`/`compile` | daily |
 | *generated* (via `synthigy.gen`) | `(movie/list {...})`, `(movie/watch-list {...})`, `@batch` fns — from your `.xsql` | daily |
 | `synthigy.client.core` | `create-client`/`*client*` (binding), `op-*` builders for `batch`, `results->data`/`ok?`, `compose-tree` | data helpers |
+| `synthigy.client.files` | `upload` `download` `replace` `versions` `restore`, folders and sharing over `/files` (JVM and CLJS) | as needed |
 | `synthigy.client.subscriptions` | raw server subscription set | advanced — prefer watch |
 
 The SDK is designed to be used via the `:as synthigy` alias — some
@@ -110,7 +111,7 @@ synthigy up
 ```
 
 The first `up` prints a `/setup` link; open it and pick a database. (No
-browser? `synthigy up --db sqlite` skips the wizard.) Already have a server?
+browser? `synthigy up --bundle sqlite` skips the wizard.) Already have a server?
 Skip this step.
 
 **2. Deploy your data model** in the modeler (or from code with `synthigy.client/deploy`, as a
@@ -132,7 +133,7 @@ machine; for a remote server, create the client in the console.)
 **4. Install the SDK:**
 
 ```clojure
-{:deps {com.synthigy/sdk {:mvn/version "0.1.0"}}}   ; deps.edn
+{:deps {com.synthigy/sdk {:mvn/version "0.2.3"}}}   ; deps.edn
 ```
 
 **5. Write a query** in `xsql/movies.xsql`:
@@ -221,14 +222,12 @@ closure-local atom, refreshes 30s before expiry. A refused mint is
 `INVALID_AUDIENCE` (the client isn't linked to the API), else `TOKEN_ERROR`;
 the message carries the server's `error_description`.
 
-Add `:audience` (JVM default: `$SYNTHIGY_AUDIENCE`) to bind one audience to
-every mint this client makes. The platform's audience model is **opt-in by
-design** — a token minted naming no audience resolves to an identity-only
-audience that `/data` rejects, so without this every data call 401s. Set it to
-the server's `/data` audience, published at `/.well-known/synthigy` as
-`auth.oidc.audience`. Left unset the SDK names no audience, so an unentitled
-client keeps a soft 401 rather than a hard `invalid_target`. `client/token`
-with `:audience` still overrides per call.
+Leave `:audience` (JVM: `$SYNTHIGY_AUDIENCE`) unset: every mint names the
+platform audience (`https://synthigy.com`), which `/data` and the other
+platform endpoints require. A token naming no audience would get an
+identity-only one that `/data` rejects. A client not linked to the platform API
+fails the mint with `INVALID_AUDIENCE`. `client/token` with `:audience` mints
+for a *different* API, per call.
 
 **2. Static token (tests, scripts, pre-issued tokens):**
 
@@ -406,7 +405,73 @@ movie (release_year >= ?from:int, order by title asc, limit 20)
 
 - `?name:type=default` are named params, passed as a map.
 - `->genres` is a **left** pull — a movie with no genres is still returned;
-  `-genres` is **inner** and keeps only movies that have one.
+  `-genres` is **inner** and keeps only movies that have one; `!genres` keeps
+  only movies with none (filters allowed, no fields under it).
+
+### Files
+
+`synthigy.client.files` (JVM and CLJS) speaks the engine's `/files` endpoints:
+the bytes, their versions and folders, under the same access control as your
+data. Each file is also a `File` record on `/data`. The calls match the JS
+SDK's `client.files`.
+
+```clojure
+(require '[synthigy.client.files :as files])
+
+(files/folder "/site/img/")                        ; the folder, and any missing above it
+(files/put "/site/img/logo.png" (io/file "logo.png"))  ; creates the file
+(files/put "/site/img/logo.png" new-bytes)         ; replaces it: same xid, a new version
+(files/download "/site/img/logo.png")              ; bytes; :as :text, :as :stream
+(files/info "/site/img/logo.png")                  ; the file, or nil
+(files/list "/site/img/")                          ; {:files [...] :folders [...]}
+(files/move "/site/img/logo.png" "/site/brand/")
+(files/delete "/site/brand/logo.png")
+```
+
+A file is a path (`"/site/img/logo.png"`), an xid or the file itself. A
+folder is a path ending in `/` (`"/"` is ROOT), an xid or the folder itself.
+
+```clojure
+(files/put {:name "scan.pdf"} bytes)               ; a new file in no folder
+(files/put f next-bytes :if-match f)               ; FILE_CHANGED if someone was first
+(files/download f :range [0 1023])                 ; :version v for a kept one
+(files/list nil)                                   ; files in no folder
+(files/list :all :q "invoice")                     ; every file you can see, newest first
+(files/search "site logo" :folder "/site/" :limit 20) ; {:results [...] :truncated}, each with :type
+(files/url "/site/img/logo.png")                   ; https://…/files/path/site/img/logo.png, no request
+(files/url f :inline true)                         ; …/files/<xid>?disposition=inline
+
+(files/folder "/site/" {:public true :cache 3600}) ; its own settings; nil inherits
+(files/move "/site/img/" "/site/media/")           ; a folder's new path; paths below follow
+(files/share "/site/" :write {:users [user-xid] :groups [group-xid]})
+(files/unshare "/site/" :write {:users [user-xid]})
+(files/access "/site/")                            ; {:read {:users :groups} :write … :delete …}
+(files/restore f (second (files/versions f)))      ; no bytes copied
+```
+
+`put` never creates folders (`FOLDER_NOT_FOUND` names the missing one in
+`:path`) and `move` never overwrites (`FILE_NAME_TAKEN`). File User may set a
+folder's `cache` but not `public` (`ATTRIBUTE_FORBIDDEN`). Files and folders
+change only through `/files`: a write of them on `/data` is `ENGINE_OWNED`.
+
+On the JVM `put` takes bytes, a string (sent as UTF-8 text), a `java.io.File`
+or an `InputStream`, and `serve` answers a ring request with the file (Range
+and If-None-Match pass through). One request carries up to the server's
+`SYNTHIGY_SERVER_MAX_BODY` (25 MB by default). The engine's
+[files guide](https://github.com/synthigy/synthigy/blob/main/docs/FILES.md)
+covers storage, access and retention.
+
+In ClojureScript every call returns a Promise. `put` takes a `Blob`, an
+`ArrayBuffer`, a `Uint8Array` or a string; `download` resolves to a
+`Uint8Array`, or `:as :blob`, `:text`, `:array-buffer`, `:stream`, `:response`.
+`object-url` gives a browser `{:url :revoke}` for a private file, and `serve`
+answers a `js/Request` with a `js/Response`.
+
+```clojure
+(p/let [f (files/put "/reports/q3.pdf" blob)
+        head (files/download f :range [0 1023])]
+  (files/put f new-blob :if-match f))
+```
 
 ### Batch
 
@@ -572,6 +637,14 @@ SYNTHIGY_TEST_CLIENT_ID=test-sdk \
 SYNTHIGY_TEST_CLIENT_SECRET=test-secret \
   clj -M:integration
 
+# Live files tests (needs the files module and three client-credentials clients
+# whose service users hold File Admin, File User and File Reader; skips without the endpoint)
+SYNTHIGY_FILES_TEST_ENDPOINT=http://localhost:7887 \
+SYNTHIGY_FILES_TEST_ADMIN_ID=… SYNTHIGY_FILES_TEST_ADMIN_SECRET=… \
+SYNTHIGY_FILES_TEST_USER_ID=… SYNTHIGY_FILES_TEST_USER_SECRET=… \
+SYNTHIGY_FILES_TEST_READER_ID=… SYNTHIGY_FILES_TEST_READER_SECRET=… \
+  clj -M:files-integration
+
 # Live browser login, played headlessly (confidential client + password user)
 SYNTHIGY_TEST_LOGIN_CLIENT_ID=… SYNTHIGY_TEST_LOGIN_CLIENT_SECRET=… \
 SYNTHIGY_TEST_LOGIN_USER=… SYNTHIGY_TEST_LOGIN_PASSWORD=… \
@@ -590,6 +663,7 @@ build reads sources straight from `deps.edn` (`:dev` alias).
 npm install            # pull the shadow-cljs CLI (one-time)
 npm test               # compile the :test build → node out/test.js
 npm run test:watch     # watch mode
+npm run test:files     # live files suite; same SYNTHIGY_FILES_TEST_* env as the JVM one, skips without it
 npx shadow-cljs cljs-repl <build>   # browser REPL
 ```
 
@@ -721,4 +795,4 @@ This SDK is the right tool when:
 ## License
 
 MIT — see [LICENSE](LICENSE). The SDKs are permissive client libraries; the
-Synthigy engine is fair-code under the Sustainable Use License.
+Synthigy engine is source-available under the Business Source License 1.1.

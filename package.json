@@ -5,6 +5,7 @@
   "private": true,
   "scripts": {
     "test": "npx shadow-cljs compile test && node out/test.js",
+    "test:files": "npx shadow-cljs compile live-test && node out/live-test.js",
     "test:watch": "npx shadow-cljs watch test"
   },
   "license": "MIT",

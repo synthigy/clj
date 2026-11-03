@@ -83,8 +83,10 @@
 (defn- authed-once
   "Single authenticated fetch. Returns a promise of
    `{:status :headers :body-text :stream}` — body-text is unset for
-   stream responses; stream is unset otherwise."
-  [client method url {:keys [headers body timeout-ms stream? signal] :as opts}]
+   stream responses; stream is unset otherwise. With `:as` :bytes or :blob
+   a 2xx body arrives as `:body` (a Uint8Array or Blob) instead; `:as
+   :response` hands back the unread js/Response as `:response`, any status."
+  [client method url {:keys [headers body timeout-ms stream? signal as] :as opts}]
   ;; p/let's binding flattens a thenable, so a bare (token-fn) call resolves
   ;; to the token string whether token-fn is sync or async. NOT (p/resolved
   ;; (token-fn)) — promesa/resolved wraps rather than flattens a nested
@@ -117,11 +119,26 @@
                (do (safe-invoke! (:on-response client) req
                                  {:status status :elapsed-ms elapsed})
                    {:status status :stream (.-body resp)})
-               (p/let [body-text (.text resp)]
-                 (safe-invoke! (:on-response client) req
-                               {:status status :body body-text :elapsed-ms elapsed})
-                 {:status status :body-text body-text
-                  :content-type (.. resp -headers (get "content-type"))})))))
+               (cond
+                 (= :response as)
+                 (do (safe-invoke! (:on-response client) req {:status status :elapsed-ms elapsed})
+                     {:status status :response resp :headers (.-headers resp)})
+
+                 (and (#{:bytes :blob} as) (<= 200 status 299))
+                 (p/let [body (if (= :blob as)
+                                (.blob resp)
+                                (p/then (.arrayBuffer resp) #(js/Uint8Array. %)))]
+                   (safe-invoke! (:on-response client) req
+                                 {:status status :elapsed-ms elapsed})
+                   {:status status :body body :headers (.-headers resp)
+                    :content-type (.. resp -headers (get "content-type"))})
+
+                 :else
+                 (p/let [body-text (.text resp)]
+                   (safe-invoke! (:on-response client) req
+                                 {:status status :body body-text :elapsed-ms elapsed})
+                   {:status status :body-text body-text :headers (.-headers resp)
+                    :content-type (.. resp -headers (get "content-type"))}))))))
         (p/catch
          (fn [e]
            (when timer (js/clearTimeout timer))

@@ -5,7 +5,12 @@
  {:test
   {:target :node-test
    :output-to "out/test.js"
-   :ns-regexp "-test$"}
+   :ns-regexp "(?<!-live)-test$"}
+
+  :live-test
+  {:target :node-test
+   :output-to "out/live-test.js"
+   :ns-regexp "-live-test$"}
 
   ;; Throwaway harness — real-browser verification of the CLJS SDK's watch/mux
   ;; port, NOT a shipped example. See dev/browser-demo/src/demo/core.cljs.

@@ -359,7 +359,7 @@
 
 (defn- mux-dispatch [mux event]
   (doseq [{:keys [interest sink]} (vals (:watches @mux))]
-    (when (core/event-matches? interest event)
+    (when (and sink (core/event-matches? interest event))
       (try (sink event)
            (catch :default e
              (js/console.warn "synthigy.client watch sink threw:" (ex-message e)))))))
@@ -389,10 +389,13 @@
     (mux-flush! mux)
     (mux-maybe-stop! mux)))
 
-(defn- mux-set-interest! [id interest]
+(defn- mux-set-interest!
+  "Re-point a live watcher's interest; a no-op once it is unregistered."
+  [id interest]
   (let [mux (:mux (core/the-client))]
-    (swap! mux assoc-in [:watches id :interest] interest)
-    (mux-flush! mux)))
+    (when (get-in @mux [:watches id])
+      (swap! mux assoc-in [:watches id :interest] interest)
+      (mux-flush! mux))))
 
 (defn watch
   "Open a live SSE subscription for `interest` and stream change events to
@@ -464,8 +467,9 @@
                      :or {debounce-ms 80 entity-track true}}]
   (let [value (atom nil)
         gen   (atom 0)
+        closed? (atom false)
         poke! (fn [] (debounced-refetch! gen debounce-ms
-                       #(p/catch (p/then (run) (fn [rows] (reset! value rows)))
+                       #(p/catch (p/then (run) (fn [rows] (when-not @closed? (reset! value rows))))
                                  (fn [e]
                                    (js/console.warn "synthigy.client watch refetch failed:"
                                                     (ex-message e))))))
@@ -483,7 +487,11 @@
         (when track-rows
           (add-watch value ::track-rows
                      (fn [_ _ _ rows] (mux-set-interest! id (interest-for rows)))))
-        (alter-meta! value assoc :close #(mux-unregister! id) :watch-id id)
+        (alter-meta! value assoc
+                     :close #(do (reset! closed? true)
+                                 (remove-watch value ::track-rows)
+                                 (mux-unregister! id))
+                     :watch-id id)
         value))))
 
 (defn watch-query

@@ -221,7 +221,7 @@
         ;; a closed channel hands every taker nil immediately, so it wins the
         ;; alts!! race against the timeout; an OPEN channel would let the
         ;; timeout win. Deterministic, never hangs.
-        (is (= ch (second (a/alts!! [ch (a/timeout 1000)])))
+        (is (= ch (second (a/alts!! [ch #_{:clj-kondo/ignore [:type-mismatch]} (a/timeout 1000)])))
             "watch channel should be closed after disconnect!"))
       (is (empty? (:watches @(:mux fake))) "watches map cleared"))))
 
@@ -247,3 +247,48 @@
           (is (= ["Movie" "UserRating"] (:interest-entities opts)))
           (is (= "u-1" (:acting-as opts)))
           (is (nil? (:entities opts)) ":entities must not ride along under its old name"))))))
+
+(def mux-set-interest! #'client/mux-set-interest!)
+(def live-value*       #'client/live-value*)
+
+(deftest a-closed-watch-stays-closed
+  ;; REGRESSION: closing a :track-rows watch while its refetch was in flight
+  ;; let the refetch reset! the atom, whose row-tracking watch re-created the
+  ;; unregistered entry as {:interest …} with no :ch. mux-dispatch then threw on
+  ;; (a/put! nil …), and every watcher after the ghost lost the event.
+  (testing "an entry without a channel is skipped, later watchers still get the event"
+    (let [got (promise)
+          ch  (spawn-watch-channel! #(deliver got %))
+          fake-mux (atom {:watches (array-map "ghost" {:interest {:records ["r-1"]}}
+                                              "live"  {:interest {:records ["r-1"]} :ch ch})})]
+      (mux-dispatch fake-mux {:type "record/update" :record-xid "r-1"})
+      (is (= "r-1" (:record-xid (deref got 500 :timeout))))))
+  (testing "re-pointing the interest of an unregistered watch does not revive it"
+    (let [fake {:endpoint "http://localhost:0/data"
+                :mux  (atom {:watches {}})
+                :subs (atom {:data {} :entities #{} :relations #{} :models #{}})}]
+      (with-redefs [http/post-json (fn [& _] nil)]
+        (binding [core/*client* fake]
+          (mux-set-interest! "gone" {:records ["r-1"]})))
+      (is (empty? (:watches @(:mux fake))))))
+  (testing "a refetch that finishes after close neither repaints the atom nor registers interest"
+    (let [fake {:endpoint "http://localhost:0/data"
+                :mux  (atom {:watches {}})
+                :subs (atom {:data {} :entities #{} :relations #{} :models #{}})}
+          release (promise)
+          calls (atom 0)
+          run (fn [] (if (= 1 (swap! calls inc)) [{:xid "a"}] (do @release [{:xid "b"}])))]
+      (with-redefs [http/post-json (fn [& _] nil)
+                    client/listen  (fn [& _] nil)]
+        (binding [core/*client* fake]
+          (let [v (live-value* "thing" run {:records ["room"] :track-rows true :entity-track false
+                                            :debounce-ms 1})
+                id (:watch-id (meta v))
+                ch (get-in @(:mux fake) [:watches id :ch])]
+            (a/>!! ch {:type "record/update" :record-xid "room"})
+            (Thread/sleep 100)
+            (client/close-watch! v)
+            (deliver release true)
+            (Thread/sleep 200)
+            (is (= [{:xid "a"}] @v) "the closed atom keeps its last value")
+            (is (empty? (:watches @(:mux fake))) "no ghost entry")))))))

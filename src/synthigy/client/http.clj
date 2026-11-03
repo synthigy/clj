@@ -65,7 +65,9 @@
     :get (http/get url opts)
     :post (http/post url opts)
     :put (http/put url opts)
-    :delete (http/delete url opts)))
+    :patch (http/patch url opts)
+    :delete (http/delete url opts)
+    :head (http/head url opts)))
 
 
 (defn- safe-invoke!
