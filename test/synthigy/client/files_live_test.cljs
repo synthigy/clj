@@ -28,10 +28,11 @@
   (p/let [buf (if (instance? js/Uint8Array x) x (p/then (.arrayBuffer x) #(js/Uint8Array. %)))]
     (vec (js/Array.from buf))))
 
-(defn mk [role]
-  (core/create-client {:endpoint endpoint
-                       :client-id (env-of (str "SYNTHIGY_FILES_TEST_" role "_ID"))
-                       :client-secret (env-of (str "SYNTHIGY_FILES_TEST_" role "_SECRET"))}))
+(defn mk [role & {:as opts}]
+  (core/create-client (merge {:endpoint endpoint
+                              :client-id (env-of (str "SYNTHIGY_FILES_TEST_" role "_ID"))
+                              :client-secret (env-of (str "SYNTHIGY_FILES_TEST_" role "_SECRET"))}
+                             opts)))
 
 (defn as
   "Run `f` with `c` as the connected client; each call captures its client before it awaits."
@@ -153,6 +154,74 @@
           got (p/then (.arrayBuffer resp) #(vec (js/Array.from (js/Uint8Array. %))))]
     (is (= BIN got) "the public link downloads without a token")))
 
+(defn status-of [u & [headers]]
+  (p/then (js/fetch u (clj->js {:headers (or headers {})})) #(.-status %)))
+
+(defn of-xid [xid xs] (first (filter #(= xid (:xid %)) xs)))
+
+(defn download-links-step
+  "Links are off until File Admin switches them on; a link downloads without a token until it ends."
+  [user admin reader F user-xid st]
+  (p/let [shut (as user files/put (str (:path F) "link-" run-id ".txt") "linked")
+          _ (swap! st assoc :shut shut)
+          _ (as admin files/folder (:path F) {:public false})
+          e (refused (as user files/link shut))
+          _ (is (= ["LINKS_DISABLED" "iam"] ((juxt :code :category) e)))
+          e (refused (as user files/folder (:path F) {:can-link true}))
+          _ (is (= ["ATTRIBUTE_FORBIDDEN" "iam"] ((juxt :code :category) e)))
+          shown (as admin files/folder (:path F) {:can-link true})
+          _ (is (true? (:can-link shown)))
+          e (refused (as reader files/link shut))
+          _ (is (= ["FORBIDDEN" "iam"] ((juxt :code :category) e)))
+          e (refused (as user files/link shut :expires 0))
+          _ (is (= ["INVALID_EXPIRES" "validation"] ((juxt :code :category) e)))
+          link (as user files/link shut :expires 600)
+          _ (is (= [(:xid shut) user-xid 0] ((juxt :file :created-by :downloads) link)))
+          got (js/fetch (:url link))
+          _ (is (= [200 "no-referrer"] [(.-status got) (.get (.-headers got) "referrer-policy")]))
+          text (.text got)
+          _ (is (= "linked" text))
+          once (as user files/link shut :max-downloads 1 :inline true)
+          first-get (js/fetch (:url once) #js {:headers #js {"range" "bytes=1-2"}})
+          _ (is (= 200 (.-status first-get)) "a limited link ignores Range")
+          _ (is (re-find #"^inline" (str (.get (.-headers first-get) "content-disposition"))))
+          text (.text first-get)
+          _ (is (= "linked" text))
+          s (status-of (:url once))
+          _ (is (= 404 s) "used up")
+          camel (mk "USER" :key-format "camel")
+          seen (p/then (as camel files/links shut) #(of-xid (:xid link) %))
+          _ (is (= [user-xid nil false] [(:createdBy seen) (:maxDownloads seen) (contains? seen :created_by)]) "key-format camel")
+          ci (as camel files/info shut)
+          ui (as user files/info shut)
+          _ (is (= (:content-type ui) (:contentType ci)))
+          mine (as user files/links shut)
+          _ (is (= 1 (:downloads (of-xid (:xid link) mine))))
+          _ (is (not-any? :url mine) "the url is shown once")
+          admins (as admin files/link shut)
+          mine (as user files/links shut)
+          _ (is (nil? (of-xid (:xid admins) mine)) "File User sees its own")
+          all (as admin files/links shut)
+          _ (is (of-xid (:xid link) all) "File Admin sees all")
+          e (refused (as user files/unlink (:xid admins)))
+          _ (is (= ["LINK_NOT_FOUND" "not_found"] ((juxt :code :category) e)))
+          _ (as admin files/folder (:path F) {:can-link false})
+          s (status-of (:url link))
+          _ (is (= 404 s) "switched off: existing links stop")
+          _ (as admin files/folder (:path F) {:can-link true})
+          s (status-of (:url link))
+          _ (is (= 200 s))
+          u (as user files/unlink link)
+          _ (is (nil? u))
+          s (status-of (:url link))
+          _ (is (= 404 s) "unlinked: gone at once")
+          _ (as user files/delete shut)
+          _ (swap! st dissoc :shut)
+          s (status-of (:url admins))
+          _ (is (= 404 s) "file deleted: its links die")
+          back (as admin files/folder (:path F) {:public true :can-link nil})]
+    (is (= {:public true :cache 120 :can-link nil} (:settings back)))))
+
 (deftest files-live
   (if-not endpoint
     (do (println "SKIP files-live: set SYNTHIGY_FILES_TEST_ENDPOINT and the ADMIN/USER/READER client ids and secrets")
@@ -201,6 +270,9 @@
                     ;; 5. links: File Admin makes F public
                     _ (links-step user admin F bin)
 
+                    ;; 5b. download links
+                    _ (download-links-step user admin reader F user-xid st)
+
                     ;; 6. admin moves the subfolder to ROOT
                     moved (as admin files/move S (str "/" srenamed "/"))
                     _ (is (= (:parent F) (:parent moved)) "a top folder's parent is ROOT")
@@ -225,9 +297,9 @@
             (p/catch (fn [e] (is false (str "live files suite failed: " (ex-message e) " " (pr-str (ex-data e))))))
             (p/finally
               (fn []
-                (let [{:keys [F S bin json loose]} @st
+                (let [{:keys [F S bin json loose shut]} @st
                       quiet #(p/catch % (constantly nil))]
-                  (-> (p/doseq [f (remove nil? [bin json loose])]
+                  (-> (p/doseq [f (remove nil? [bin json loose shut])]
                         (quiet (as user files/delete (:xid f))))
                       (p/then #(when S (quiet (as admin delete-folder-xid! (:xid S)))))
                       (p/then #(when F (quiet (as admin delete-folder-xid! (:xid F)))))

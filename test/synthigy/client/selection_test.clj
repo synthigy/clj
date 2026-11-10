@@ -181,6 +181,6 @@
     (let [out (selection/normalize {:genres {:xid nil}})]
       (is (= {:genres [{:selections {:xid nil}}]} out)
           "no :args, no :_join — the selection travels as written"))
-    (let [out (selection/normalize {:_count {:actors nil}})]
-      (is (not (contains? (:args (first (:_count out))) :_join))
-          "_count subtrees carry no join either"))))
+    (let [ops [{:alias :votes :op "count"} {:alias :rating :op {:avg :value}}]]
+      (is (= {:ratings ops} (selection/normalize {:ratings ops}))
+          "operation entries travel as written"))))

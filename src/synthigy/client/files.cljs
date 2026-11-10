@@ -10,9 +10,10 @@
 
   A file is a path (/a/b/name), an xid or the file itself; a folder is a path
   ending in /, an xid or the folder itself. Response keys follow the client's
-  :key-format: kebab-case by default, wire snake_case otherwise."
+  :key-format, as /data results do: kebab-case by default."
   (:refer-clojure :exclude [list])
   (:require
+   [clojure.set :as set]
    [clojure.string :as str]
    [promesa.core :as p]
    [synthigy.client.core :as core]
@@ -29,6 +30,8 @@
 (defn xid-of [x] (if (map? x) (:xid x) x))
 
 (defn path? [x] (and (string? x) (str/starts-with? x "/")))
+
+(defn file-ref [x] (if (map? x) (or (:xid x) (:path x)) x))
 
 (defn folder-ref [x] (if (map? x) (or (:path x) (:xid x)) x))
 
@@ -75,9 +78,15 @@
       (err/ex-info (str "Files request failed: HTTP " status)
                    {:code "HTTP_ERROR" :status status :body body-text :request-id request-id}))))
 
+(defn cased
+  "`u` with the client's key format as ?key_format=, unless it is snake or unset."
+  [u]
+  (let [kf (some-> (core/the-client) :key-format name)]
+    (if (or (nil? kf) (= "snake" kf)) u (str u (if (str/includes? u "?") "&" "?") "key_format=" kf))))
+
 (defn send!
   [method u opts]
-  (p/let [resp (http/authed method u opts)]
+  (p/let [resp (http/authed method (cased u) opts)]
     (cond
       (or (<= 200 (:status resp) 299) (= 304 (:status resp))) resp
       (:response resp) (p/let [text (.text ^js (:response resp))] (throw (refusal (assoc resp :body-text text))))
@@ -177,6 +186,21 @@
             :stream (.-body r)
             r))))))
 
+(defn zip
+  "One zip of :files and of everything inside :folders (xids, paths or maps), read as you; what you cannot read is listed in its _skipped.txt. :as as in download (:bytes default)."
+  [& {:keys [files folders as] :or {as :bytes}}]
+  (p/let [resp (send! :post (endpoint-url "/zip" nil)
+                      {:as (case as (:bytes :blob) as :response)
+                       :headers {"Content-Type" "application/json"}
+                       :body (js/JSON.stringify (clj->js {:files (mapv file-ref files) :folders (mapv folder-ref folders)}))})]
+    (let [^js r (:response resp)]
+      (case as
+        (:bytes :blob) (:body resp)
+        :text (.text r)
+        :array-buffer (.arrayBuffer r)
+        :stream (.-body r)
+        r))))
+
 (defn info
   "File `ref`, or nil when it is not there or you cannot see it."
   [ref]
@@ -254,9 +278,9 @@
     (catch :default e (p/rejected e))))
 
 (defn folder
-  "The folder at `path`, made with every missing folder above it; `settings` {:public :cache} sets its own values (nil inherits)."
+  "The folder at `path`, made with every missing folder above it; `settings` {:public :cache :can-link} sets its own values (nil inherits)."
   ([path] (folder path {}))
-  ([path settings] (json-call :put "/folders" settings {:path path})))
+  ([path settings] (json-call :put "/folders" (set/rename-keys settings {:can-link :can_link}) {:path path})))
 
 (defn grantees [{:keys [users groups]}]
   {:users (mapv xid-of users) :groups (mapv xid-of groups)})
@@ -290,6 +314,30 @@
   [ref version]
   (p/let [x (xid-at ref)]
     (json-call :post (str (seg x) "/versions/" (enc (version-id version)) "/restore"))))
+
+(defn link-body [{:keys [expires max-downloads inline]}]
+  (cond-> {}
+    (some? expires) (assoc :expires expires)
+    (some? max-downloads) (assoc :max_downloads max-downloads)
+    (some? inline) (assoc :inline inline)))
+
+(defn link
+  "A link that downloads file `ref` without signing in, where its folder allows links; its :url is shown only now. Options: :expires (seconds, default 3600, at most 7 days) :max-downloads :inline"
+  [ref & {:as opts}]
+  (p/let [x (xid-at ref)]
+    (json-call :post (str (seg x) "/links") (link-body opts))))
+
+(defn links
+  "The live links of file `ref` you can see: your own, or all of them for File Admin."
+  [ref]
+  (p/let [x (xid-at ref)
+          r (json-call :get (str (seg x) "/links"))]
+    (:links r)))
+
+(defn unlink
+  "End `link` (the link or its xid) at once, on every engine."
+  [link]
+  (p/let [_ (json-call :delete (str "/links" (seg link)))] nil))
 
 (defn object-url
   "Browser: download with your token into a blob: URL for <img> or <iframe>: {:url :revoke}."

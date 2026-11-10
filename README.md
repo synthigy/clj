@@ -26,7 +26,7 @@ side by side under `src/synthigy/client/`:
 From Clojars — `deps.edn`:
 
 ```clojure
-{:deps {com.synthigy/sdk {:mvn/version "0.2.3"}}}
+{:deps {com.synthigy/sdk {:mvn/version "0.2.4"}}}
 ```
 
 Leiningen:
@@ -92,7 +92,7 @@ the raw wire keys, or `"camel"`.
 | `synthigy.client` | `connect!` + XSQL `query`/`sql-template`, writes `sync` `stack` `delete`, `batch`, `watch-sql-template`/`watch`/`close-watch!`, `history-*`, `schema`/`lint`/`compile` | daily |
 | *generated* (via `synthigy.gen`) | `(movie/list {...})`, `(movie/watch-list {...})`, `@batch` fns — from your `.xsql` | daily |
 | `synthigy.client.core` | `create-client`/`*client*` (binding), `op-*` builders for `batch`, `results->data`/`ok?`, `compose-tree` | data helpers |
-| `synthigy.client.files` | `upload` `download` `replace` `versions` `restore`, folders and sharing over `/files` (JVM and CLJS) | as needed |
+| `synthigy.client.files` | `upload` `download` `replace` `versions` `restore`, folders, sharing and download links over `/files` (JVM and CLJS) | as needed |
 | `synthigy.client.subscriptions` | raw server subscription set | advanced — prefer watch |
 
 The SDK is designed to be used via the `:as synthigy` alias — some
@@ -133,7 +133,7 @@ machine; for a remote server, create the client in the console.)
 **4. Install the SDK:**
 
 ```clojure
-{:deps {com.synthigy/sdk {:mvn/version "0.2.3"}}}   ; deps.edn
+{:deps {com.synthigy/sdk {:mvn/version "0.2.4"}}}   ; deps.edn
 ```
 
 **5. Write a query** in `xsql/movies.xsql`:
@@ -447,7 +447,36 @@ folder is a path ending in `/` (`"/"` is ROOT), an xid or the folder itself.
 (files/unshare "/site/" :write {:users [user-xid]})
 (files/access "/site/")                            ; {:read {:users :groups} :write … :delete …}
 (files/restore f (second (files/versions f)))      ; no bytes copied
+(files/zip :folders ["/site/img/"] :files ["/notes/today.txt"])  ; zip bytes; :as :stream; unreadable ones in _skipped.txt
 ```
+
+#### Links
+
+A link hands one file to someone without an account, no sign-in, and ends on
+its own:
+
+```clojure
+(files/folder "/reports/" {:can-link true})        ; File Admin's to set; inherited, off until set
+(def l (files/link "/reports/q3.pdf" :expires 86400 :max-downloads 3))  ; :inline true too
+(:url l)                                           ; https://…/files/link/<token>, shown only now
+(files/links "/reports/q3.pdf")                    ; live links you can see (File Admin: all)
+(files/unlink l)                                   ; or its xid; ends at once, on every engine
+```
+
+- Only in folders where `can-link` is on; files in no folder never
+  (`LINKS_DISABLED`, iam). `false` below a `true` turns it off again, also
+  for links already made.
+- File User and File Admin link files they can read; File Reader cannot.
+  Every download checks that whoever made the link can still read the file.
+- `:expires` seconds, 3600 by default, at most 7 days (`INVALID_EXPIRES`,
+  validation). With `:max-downloads` each GET is one whole download (Range
+  is ignored).
+- An expired, used-up, revoked or wrong link is `LINK_NOT_FOUND` (not_found).
+- The `:url` cannot be read back later: only a hash of its token is stored.
+
+Answers from `/files` follow the client's `:key-format` (`:can-link`,
+`:max-downloads` by default; `"camel"` gives `:canLink`); `nil` or `"snake"`
+keeps the wire's snake_case.
 
 `put` never creates folders (`FOLDER_NOT_FOUND` names the missing one in
 `:path`) and `move` never overwrites (`FILE_NAME_TAKEN`). File User may set a
@@ -456,8 +485,9 @@ change only through `/files`: a write of them on `/data` is `ENGINE_OWNED`.
 
 On the JVM `put` takes bytes, a string (sent as UTF-8 text), a `java.io.File`
 or an `InputStream`, and `serve` answers a ring request with the file (Range
-and If-None-Match pass through). One request carries up to the server's
-`SYNTHIGY_SERVER_MAX_BODY` (25 MB by default). The engine's
+and If-None-Match pass through). One request has no size limit on the
+Enso and Jetty servers; on http-kit it carries up to `SYNTHIGY_HTTPKIT_MAX_BODY`
+(25 MB by default), refused with a 413. The engine's
 [files guide](https://github.com/synthigy/synthigy/blob/main/docs/FILES.md)
 covers storage, access and retention.
 
@@ -687,7 +717,7 @@ Every network verb returns a **Promise** instead of blocking; the data helpers
 (`op-*`, `results->data`, `compose-tree`, `ok?`) are identical to the JVM side.
 `/data` speaks **transit** in both builds (JVM and browser) — EDN-native
 values end to end: keywords, sets, instants as real `js/Date`, and the
-engine's `_agg` BigDecimals as JS numbers (the reader carries `f`/`n`
+engine's BigDecimals (`sum` / `avg`) as JS numbers (the reader carries `f`/`n`
 handlers; transit's default hands back an opaque tagged value). Sibling
 endpoints that force JSON server-side (`/schema`, `/lint`) are decoded as
 JSON, by response Content-Type. There is no `:wire-format` option.

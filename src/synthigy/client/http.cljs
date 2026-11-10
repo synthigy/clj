@@ -20,7 +20,7 @@
 ;; /data speaks transit so temporal values arrive as real js/Date (JSON would
 ;; flatten them to strings). Writer is compact `:json`; the reader auto-detects
 ;; verbose too, so it reads whatever the server emits. `~f`/`~n` (the engine
-;; bigdec's `_agg` leaves) decode to JS numbers — transit-js's default keeps
+;; bigdec `sum`/`avg` values) decode to JS numbers — transit-js's default keeps
 ;; them as opaque TaggedValues.
 (def tw (transit/writer :json))
 (def tr (transit/reader :json {:handlers {"f" js/parseFloat "n" js/parseInt}}))

@@ -79,7 +79,8 @@
                       write :published-on, so responses match. Pass nil for
                       the raw wire snake_case, or \"camel\".
     :request-timeout — HTTP timeout in ms for /data and /schema requests
-                       (default 30000). SSE streams ignore this.
+                       (default 30000). SSE streams and file bytes
+                       (files put, download, zip, serve) ignore this.
     :on-request     — (fn [req]) before each HTTP attempt.
                       req: {:method :url :headers :body}
     :on-response    — (fn [req resp]) after each HTTP attempt.

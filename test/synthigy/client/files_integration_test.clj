@@ -13,10 +13,11 @@
 
 (def endpoint (System/getenv "SYNTHIGY_FILES_TEST_ENDPOINT"))
 
-(defn identity-client [who]
-  (core/create-client {:endpoint endpoint
-                       :client-id (System/getenv (str "SYNTHIGY_FILES_TEST_" who "_ID"))
-                       :client-secret (System/getenv (str "SYNTHIGY_FILES_TEST_" who "_SECRET"))}))
+(defn identity-client [who & {:as opts}]
+  (core/create-client (merge {:endpoint endpoint
+                              :client-id (System/getenv (str "SYNTHIGY_FILES_TEST_" who "_ID"))
+                              :client-secret (System/getenv (str "SYNTHIGY_FILES_TEST_" who "_SECRET"))}
+                             opts)))
 
 (defmacro as [c & body] `(binding [core/*client* ~c] ~@body))
 
@@ -38,6 +39,17 @@
      :body (with-open [in (.getInputStream conn)] (.readAllBytes in))
      :cors (.getHeaderField conn "Access-Control-Allow-Origin")
      :cache (.getHeaderField conn "Cache-Control")}))
+
+(defn link-get
+  "A tokenless GET of a download link: status, text and the headers a link answers with."
+  [u & {:keys [range]}]
+  (let [conn ^java.net.HttpURLConnection (.openConnection (java.net.URL. u))]
+    (when range (.setRequestProperty conn "Range" range))
+    (let [status (.getResponseCode conn)]
+      {:status status
+       :text (when (= 200 status) (with-open [in (.getInputStream conn)] (slurp in)))
+       :disposition (.getHeaderField conn "Content-Disposition")
+       :referrer (.getHeaderField conn "Referrer-Policy")})))
 
 (defn poll-versions [xid n]
   (loop [tries 60]
@@ -171,6 +183,46 @@
                       (let [r (fetch u)]
                         (is (= [200 "public, max-age=120" "*"] ((juxt :status :cache :cors) r)) u)
                         (is (same-bytes? binary (:body r))))))))
+
+              (testing "5b. download links"
+                (let [shut (as user (track! :file (files/put (str (:path top) "link-" run ".txt") "linked")))]
+                  (as admin (files/folder (:path top) {:public false}))
+                  (is (= ["LINKS_DISABLED" "iam"] ((juxt :code :category) (refused #(as user (files/link shut))))))
+                  (is (= ["ATTRIBUTE_FORBIDDEN" "iam"] ((juxt :code :category) (refused #(as user (files/folder (:path top) {:can-link true}))))))
+                  (let [shown (as admin (files/folder (:path top) {:can-link true}))]
+                    (is (true? (:can-link shown)))
+                    (is (true? (get-in shown [:settings :can-link]))))
+                  (is (= ["FORBIDDEN" "iam"] ((juxt :code :category) (refused #(as reader (files/link shut))))))
+                  (is (= ["INVALID_EXPIRES" "validation"] ((juxt :code :category) (refused #(as user (files/link shut :expires 0))))))
+                  (let [link (as user (files/link shut :expires 600))
+                        once (as user (files/link shut :max-downloads 1 :inline true))
+                        admins (as admin (files/link shut))
+                        camel (identity-client "USER" :key-format "camel")]
+                    (is (= [(:xid shut) user-xid 0] ((juxt :file :created-by :downloads) link)))
+                    (is (= [200 "no-referrer" "linked"] ((juxt :status :referrer :text) (link-get (:url link)))))
+                    (let [first-get (link-get (:url once) :range "bytes=1-2")]
+                      (is (= [200 "linked"] ((juxt :status :text) first-get)) "a limited link ignores Range")
+                      (is (re-find #"^inline" (str (:disposition first-get)))))
+                    (is (= 404 (:status (link-get (:url once)))) "used up")
+                    (let [seen (some #(when (= (:xid link) (:xid %)) %) (as camel (files/links shut)))]
+                      (is (= [user-xid nil false] [(:createdBy seen) (:maxDownloads seen) (contains? seen :created_by)]) "key-format camel")
+                      (is (= (:content-type (as user (files/info shut))) (:contentType (as camel (files/info shut))))))
+                    (let [mine (as user (files/links shut))]
+                      (is (= 1 (:downloads (some #(when (= (:xid link) (:xid %)) %) mine))))
+                      (is (not-any? :url mine) "the url is shown once")
+                      (is (not-any? #(= (:xid admins) (:xid %)) mine) "File User sees its own"))
+                    (is (some #(= (:xid link) (:xid %)) (as admin (files/links shut))) "File Admin sees all")
+                    (is (= ["LINK_NOT_FOUND" "not_found"] ((juxt :code :category) (refused #(as user (files/unlink (:xid admins)))))))
+                    (as admin (files/folder (:path top) {:can-link false}))
+                    (is (= 404 (:status (link-get (:url link)))) "switched off: existing links stop")
+                    (as admin (files/folder (:path top) {:can-link true}))
+                    (is (= 200 (:status (link-get (:url link)))))
+                    (is (nil? (as user (files/unlink link))))
+                    (is (= 404 (:status (link-get (:url link)))) "unlinked: gone at once")
+                    (as user (files/delete shut))
+                    (is (= 404 (:status (link-get (:url admins)))) "file deleted: its links die")
+                    (let [back (as admin (files/folder (:path top) {:public true :can-link nil}))]
+                      (is (= {:public true :cache 120 :can-link nil} (:settings back)))))))
 
               (testing "6. admin moves the subfolder to ROOT and deletes it"
                 (as admin

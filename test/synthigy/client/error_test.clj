@@ -27,6 +27,10 @@
     (doseq [code ["RELATION_FORBIDDEN" "ATTRIBUTE_FORBIDDEN" "ROW_FORBIDDEN"
                   "CREATE_FORBIDDEN" "DELETE_FORBIDDEN" "SLOT_OCCUPIED"]]
       (is (= ["iam" false] ((juxt :category :retryable) (ex-data (err/ex-info "x" {:code code})))) code)))
+  (testing "file link codes"
+    (is (= [["iam" false] ["not_found" false] ["validation" false]]
+           (for [code ["LINKS_DISABLED" "LINK_NOT_FOUND" "INVALID_EXPIRES"]]
+             ((juxt :category :retryable) (ex-data (err/ex-info "x" {:code code})))))))
   (testing "cause is kept"
     (let [cause (Exception. "root")]
       (is (identical? cause (ex-cause (err/ex-info "x" {:code "NETWORK_ERROR"} cause)))))))

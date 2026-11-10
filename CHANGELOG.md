@@ -3,6 +3,35 @@
 All notable changes to `com.synthigy/sdk` (Clojars). Follows
 [semver](https://semver.org). Pre-1.0: breaking changes can land on minor bumps.
 
+## 0.2.4
+
+Needs an engine with `POST /files/zip` (after v0.4.1).
+
+### Breaking
+- **`_count` / `_agg` are gone** (engine after v0.4.1 refuses them).
+  Write an operation per value: XSQL `votes: count(ratings)`,
+  `rating: avg(ratings.value)`; on the wire an `{alias, op, args?}` entry
+  on the relation key. The alias is the result key and can be sorted by.
+
+### Added
+- **`files/zip`** (`:files`, `:folders`, `:as`), JVM and ClojureScript: one
+  zip of the files and of everything inside the folders, read as you.
+  `ZIP_TOO_LARGE` joins the error codes.
+- **`files/link`** (`:expires`, `:max-downloads`, `:inline`), `files/links`,
+  `files/unlink` (the link or its xid), JVM and ClojureScript: download links
+  for people without an account, where the folder's `can_link` allows them;
+  `files/folder` takes `:can-link` (or `:can_link`). `LINKS_DISABLED`,
+  `LINK_NOT_FOUND` and `INVALID_EXPIRES` join the error codes.
+- `/files` requests carry the client's `:key-format` as `key_format` (none for
+  `nil` or `"snake"`), so `"camel"` now cases file answers too (needs an engine
+  that reads `key_format` on `/files`; older ones still get kebab-case).
+
+### Fixed
+- `:request-timeout` (default 30 s) no longer cuts file bytes short on the
+  JVM: `files/put`, `download` and `zip` run as long as the transfer takes, as
+  `serve` and `:as :stream` already did. A download over 30 s used to fail.
+- `FILES_MIGRATING` (uploads paused while the server moves files to a new store) is now category `internal` and retryable; it was unknown, so never retryable.
+
 ## 0.2.3
 
 Needs engine v0.4.1 or newer for files.

@@ -27,7 +27,9 @@
         path (.getPath uri)
         h (.getRequestHeaders ex)
         body (.readAllBytes (.getRequestBody ex))]
-    (swap! calls conj {:method method :path path :query (.getRawQuery uri) :body body
+    (swap! calls conj {:method method :path path :body body
+                       :query (not-empty (str/replace (str (.getRawQuery uri)) #"&?key_format=[a-z]+" ""))
+                       :key-format (second (re-find #"key_format=([a-z]+)" (str (.getRawQuery uri))))
                        :type (.getFirst h "Content-Type") :if-match (.getFirst h "If-Match")
                        :range (.getFirst h "Range") :auth (.getFirst h "Authorization")})
     (cond
@@ -38,6 +40,20 @@
       (and (= path "/files") (= method "GET") (str/includes? (str (.getRawQuery uri)) "path="))
       (reply ex 200 (.getBytes "0123456789") {"ETag" "\"h1\""})
       (= path "/files") (reply-json ex 200 {:files [{:xid "f1" :uploaded_at "2026-10-29T17:40:12Z"}]})
+      (str/starts-with? path "/files/slow")
+      (do (Thread/sleep 600)
+          (if (str/ends-with? path "/info")
+            (reply-json ex 200 {:xid "slow"})
+            (reply ex 200 (.getBytes "late bytes") {})))
+      (and (= path "/files/zip") (= method "POST"))
+      (if (str/includes? (String. ^bytes body "UTF-8") "/big/")
+        (reply-json ex 413 {:error {:code "ZIP_TOO_LARGE" :message "too big"}})
+        (reply ex 200 (.getBytes "PK") {"Content-Type" "application/zip"}))
+      (and (= path "/files/f9/links") (= method "POST")) (reply-json ex 201 {:xid "l1" :file "f9" :max_downloads 2 :url "http://x/files/link/t"})
+      (= path "/files/f9/links") (reply-json ex 200 {:file "f9" :links [{:xid "l1" :created_by "u1"}]})
+      (= path "/files/f8/links") (reply-json ex 403 {:error {:code "LINKS_DISABLED" :message "off"}})
+      (= path "/files/f7/links") (reply-json ex 400 {:error {:code "INVALID_EXPIRES" :message "bad"}})
+      (= path "/files/links/l2") (reply-json ex 404 {:error {:code "LINK_NOT_FOUND" :message "gone"}})
       (= path "/files/search") (reply-json ex 200 {:results [{:xid "d1" :type "folder" :path "/Docs/"}] :truncated false})
       (= path "/files/info") (reply-json ex 200 {:xid "f9" :name "r.txt"})
       (and (= path "/files/folders") (= method "PUT")) (reply-json ex 200 {:xid "d3" :path "/a b/"})
@@ -118,6 +134,20 @@
     (is (= "0123456789" (slurp in))))
   (is (= "/files/f1/versions/7" (:path (last-call)))))
 
+(deftest timeout-spares-file-bytes
+  (binding [core/*client* (assoc core/*client* :request-timeout 200)]
+    (is (= "late bytes" (String. ^bytes (files/download "slow"))) "a download outlives the request timeout")
+    (is (thrown? Exception (files/info "slow")) "a JSON call still honours it")))
+
+(deftest zip
+  (is (= "PK" (String. ^bytes (files/zip :files ["f1" "/a/r.txt" {:xid "f9"}] :folders ["/site/img/" {:xid "d1" :path "/b/"}]))))
+  (let [{:keys [method path type body]} (last-call)]
+    (is (= ["POST" "/files/zip" "application/json"] [method path type]))
+    (is (= {:files ["f1" "/a/r.txt" "f9"] :folders ["/site/img/" "/b/"]} (json/read-str (String. ^bytes body "UTF-8") {:key-fn keyword}))))
+  (with-open [in (files/zip :folders ["/x/"] :as :stream)]
+    (is (= "PK" (slurp in))))
+  (is (= "ZIP_TOO_LARGE" (:code (ex-data (try (files/zip :folders ["/big/"]) (catch clojure.lang.ExceptionInfo e e)))))))
+
 (deftest list-search-versions
   (testing "a folder: files and subfolders"
     (let [{:keys [files folders]} (files/list "d1" :q "doc" :limit 5 :offset 10)]
@@ -187,3 +217,39 @@
   (let [r (files/serve "/a/r.txt" {:request-method :get :headers {"range" "bytes=0-1"}} :inline true)]
     (is (= ["/files" "path=%2Fa%2Fr.txt&disposition=inline" "bytes=0-1"] ((juxt :path :query :range) (last-call))))
     (is (= [200 "\"h1\"" "0123456789"] [(:status r) (get-in r [:headers "etag"]) (slurp (:body r))]))))
+
+(deftest download-links
+  (is (= "http://x/files/link/t" (:url (files/link "/a/r.txt" :expires 600 :max-downloads 2 :inline true))))
+  (is (= [["GET" "/files/info" "path=%2Fa%2Fr.txt"] ["POST" "/files/f9/links" nil]]
+         (mapv (juxt :method :path :query) (take-last 2 @calls))))
+  (is (= {:expires 600 :max_downloads 2 :inline true} (sent)))
+  (files/link "f9" :inline false)
+  (is (= {:inline false} (sent)) "only what is given")
+  (is (= [["l1" "u1"]] (mapv (juxt :xid :created-by) (files/links {:xid "f9"}))))
+  (is (= ["GET" "/files/f9/links"] ((juxt :method :path) (last-call))))
+  (is (nil? (files/unlink {:xid "l1"})))
+  (is (nil? (files/unlink "l1")))
+  (is (= [["DELETE" "/files/links/l1"] ["DELETE" "/files/links/l1"]] (mapv (juxt :method :path) (take-last 2 @calls))))
+  (is (= ["LINKS_DISABLED" "iam"] ((juxt :code :category) (code-of #(files/link "f8")))))
+  (is (= ["INVALID_EXPIRES" "validation"] ((juxt :code :category) (code-of #(files/link "f7" :expires 0)))))
+  (is (= ["LINK_NOT_FOUND" "not_found"] ((juxt :code :category) (code-of #(files/unlink "l2")))))
+  (files/folder "/s/" {:can-link true :cache 60})
+  (is (= {:can_link true :cache 60} (sent)))
+  (files/folder "/s/" {:can_link nil})
+  (is (= "{\"can_link\":null}" (String. ^bytes (:body (last-call)))) "nil inherits"))
+
+(deftest key-format-reaches-files
+  (files/info "f4")
+  (is (= ["kebab" nil] ((juxt :key-format :query) (last-call))))
+  (files/list nil :q "inv")
+  (is (= ["kebab" "q=inv&folderless=true"] ((juxt :key-format :query) (last-call))))
+  (binding [core/*client* (assoc core/*client* :key-format "camel")]
+    (files/links "f9")
+    (is (= "camel" (:key-format (last-call)))))
+  (doseq [kf ["snake" nil]]
+    (binding [core/*client* (assoc core/*client* :key-format kf)]
+      (files/info "f4")
+      (is (nil? (:key-format (last-call))) (str "none for " kf))))
+  (files/url "f4")
+  (files/serve "f4" {:request-method :get :headers {}})
+  (is (nil? (:key-format (last-call))) "serve passes bytes, no key format"))

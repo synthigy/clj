@@ -10,10 +10,11 @@
 
   A file is a path (/a/b/name), an xid or the file itself; a folder is a path
   ending in /, an xid or the folder itself. Response keys follow the client's
-  :key-format: kebab-case by default, wire snake_case otherwise."
+  :key-format, as /data results do: kebab-case by default."
   (:refer-clojure :exclude [list])
   (:require
    [babashka.json :as json]
+   [clojure.set :as set]
    [clojure.string :as str]
    [synthigy.client.core :as core]
    [synthigy.client.error :as err]
@@ -34,6 +35,8 @@
 (defn xid-of [x] (if (map? x) (:xid x) x))
 
 (defn path? [x] (and (string? x) (str/starts-with? x "/")))
+
+(defn file-ref [x] (if (map? x) (or (:xid x) (:path x)) x))
 
 (defn folder-ref [x] (if (map? x) (or (:path x) (:xid x)) x))
 
@@ -80,9 +83,15 @@
       (err/ex-info (str "Files request failed: HTTP " status)
                    {:code "HTTP_ERROR" :status status :body body :request-id request-id}))))
 
+(defn cased
+  "`u` with the client's key format as ?key_format=, unless it is snake or unset."
+  [u]
+  (let [kf (some-> (core/the-client) :key-format name)]
+    (if (or (nil? kf) (= "snake" kf)) u (str u (if (str/includes? u "?") "&" "?") "key_format=" kf))))
+
 (defn send!
   [method u opts]
-  (let [resp (http/authed method u opts)]
+  (let [resp (http/authed method (cased u) opts)]
     (if (or (<= 200 (:status resp) 299) (= 304 (:status resp)))
       resp
       (throw (refusal resp)))))
@@ -151,6 +160,7 @@
                           {:code "UNSUPPORTED_MEDIA_TYPE"})))
     (-> (send! method (endpoint-url path query)
                {:body body
+                :timeout nil
                 :headers (cond-> {"Content-Type" ctype}
                            expected (assoc "If-Match" (str "\"" expected "\"")))})
         :body
@@ -165,12 +175,22 @@
                        [(str (seg (xid-at ref)) "/versions/" (enc (version-id version))) nil]
                        (file-at ref))
         resp (send! :get (endpoint-url path query)
-                    (cond-> {:headers (cond-> {}
+                    (cond-> {:timeout nil
+                             :headers (cond-> {}
                                         range (assoc "Range" (str "bytes=" start "-" end))
                                         if-none-match (assoc "If-None-Match" (str "\"" if-none-match "\"")))}
                       (not= :text as) (assoc :as (if (= :stream as) :stream :bytes))))]
     (when-not (= 304 (:status resp))
       (:body resp))))
+
+(defn zip
+  "One zip of :files and of everything inside :folders (xids, paths or maps), read as you; what you cannot read is listed in its _skipped.txt. :as :bytes (default) or :stream to close yourself."
+  [& {:keys [files folders as] :or {as :bytes}}]
+  (:body (send! :post (endpoint-url "/zip" nil)
+                {:timeout nil
+                 :headers {"Content-Type" "application/json"}
+                 :body (json/write-str {:files (mapv file-ref files) :folders (mapv folder-ref folders)})
+                 :as (if (= :stream as) :stream :bytes)})))
 
 (defn info
   "File `ref`, or nil when it is not there or you cannot see it."
@@ -248,9 +268,9 @@
     (json-call :patch path body query)))
 
 (defn folder
-  "The folder at `path`, made with every missing folder above it; `settings` {:public :cache} sets its own values (nil inherits)."
+  "The folder at `path`, made with every missing folder above it; `settings` {:public :cache :can-link} sets its own values (nil inherits)."
   ([path] (folder path {}))
-  ([path settings] (json-call :put "/folders" settings {:path path})))
+  ([path settings] (json-call :put "/folders" (set/rename-keys settings {:can-link :can_link}) {:path path})))
 
 (defn grantees [{:keys [users groups]}]
   {:users (mapv xid-of users) :groups (mapv xid-of groups)})
@@ -283,6 +303,28 @@
   "Make kept `version` (its :id, or the version) of file `ref` current again; no bytes are copied."
   [ref version]
   (json-call :post (str (seg (xid-at ref)) "/versions/" (enc (version-id version)) "/restore")))
+
+(defn link-body [{:keys [expires max-downloads inline]}]
+  (cond-> {}
+    (some? expires) (assoc :expires expires)
+    (some? max-downloads) (assoc :max_downloads max-downloads)
+    (some? inline) (assoc :inline inline)))
+
+(defn link
+  "A link that downloads file `ref` without signing in, where its folder allows links; its :url is shown only now. Options: :expires (seconds, default 3600, at most 7 days) :max-downloads :inline"
+  [ref & {:as opts}]
+  (json-call :post (str (seg (xid-at ref)) "/links") (link-body opts)))
+
+(defn links
+  "The live links of file `ref` you can see: your own, or all of them for File Admin."
+  [ref]
+  (:links (json-call :get (str (seg (xid-at ref)) "/links"))))
+
+(defn unlink
+  "End `link` (the link or its xid) at once, on every engine."
+  [link]
+  (json-call :delete (str "/links" (seg link)))
+  nil)
 
 (def served-headers
   ["content-type" "content-length" "content-range" "accept-ranges" "etag"

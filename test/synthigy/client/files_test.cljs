@@ -15,7 +15,7 @@
 (defn bytes-resp [status body]
   (js/Response. body #js {:status status :headers #js {"ETag" "\"h1\"" "Content-Type" "application/octet-stream"}}))
 
-(defn route [{:keys [method path query headers]}]
+(defn route [{:keys [method path query headers] :as call}]
   (let [h #(aget headers %)]
     (cond
       (and (= path "/files") (= method "POST"))
@@ -28,6 +28,15 @@
       (= path "/files/info") (json-resp 200 {:xid "f9" :name "r.txt"})
       (and (= path "/files/folders") (= method "PUT")) (json-resp 200 {:xid "d3" :path "/a b/"})
       (and (= path "/files/f1") (= method "PATCH")) (json-resp 200 {:xid "f1"})
+      (and (= path "/files/zip") (= method "POST"))
+      (if (str/includes? (str (:body call)) "/big/")
+        (json-resp 413 {:error {:code "ZIP_TOO_LARGE" :message "too big"}})
+        (bytes-resp 200 (js/Uint8Array. #js [80 75])))
+      (and (= path "/files/f9/links") (= method "POST")) (json-resp 201 {:xid "l1" :file "f9" :max_downloads 2 :url "http://x/files/link/t"})
+      (= path "/files/f9/links") (json-resp 200 {:file "f9" :links [{:xid "l1" :created_by "u1"}]})
+      (= path "/files/f8/links") (json-resp 403 {:error {:code "LINKS_DISABLED" :message "off"}})
+      (= path "/files/f7/links") (json-resp 400 {:error {:code "INVALID_EXPIRES" :message "bad"}})
+      (= path "/files/links/l2") (json-resp 404 {:error {:code "LINK_NOT_FOUND" :message "gone"}})
       (= path "/files/search") (json-resp 200 {:results [{:xid "d1" :type "folder" :path "/Docs/"}] :truncated false})
       (and (= path "/files/f1") (= method "PUT")) (json-resp 412 {:error {:code "FILE_CHANGED" :message "changed"}})
       (and (#{"/files/f1" "/files/f1/versions/7"} path) (= method "GET"))
@@ -49,8 +58,10 @@
 
 (defn fake-fetch [u opts]
   (let [parsed (js/URL. u)
+        search (subs (.-search parsed) 1)
         call {:method (.-method opts) :path (.-pathname parsed)
-              :query (not-empty (subs (.-search parsed) 1))
+              :query (not-empty (str/replace search #"&?key_format=[a-z]+" ""))
+              :key-format (second (re-find #"key_format=([a-z]+)" search))
               :headers (.-headers opts) :body (.-body opts)}]
     (swap! calls conj call)
     (p/resolved (route call))))
@@ -118,6 +129,17 @@
             e5 (refused (files/versions "zz"))]
       (is (= "FILES_UNAVAILABLE" (:code e5)))
       (done)) done)))
+
+(deftest zip
+  (async done
+    (guard (p/let [out (files/zip :files ["f1" {:xid "f9"}] :folders ["/site/img/" {:xid "d1" :path "/b/"}])
+                   _ (is (= [80 75] (bytes-vec out)))
+                   call (last-call)
+                   _ (is (= ["POST" "/files/zip"] ((juxt :method :path) call)))
+                   _ (is (= {:files ["f1" "f9"] :folders ["/site/img/" "/b/"]} (js->clj (js/JSON.parse (:body call)) :keywordize-keys true)))
+                   e (refused (files/zip :folders ["/big/"]))]
+             (is (= ["ZIP_TOO_LARGE" "validation"] ((juxt :code :category) e)))
+             (done)) done)))
 
 (deftest download
   (async done
@@ -233,3 +255,50 @@
       (done))))
 
 
+
+(defn body-of [call] (js->clj (js/JSON.parse (:body call)) :keywordize-keys true))
+
+(deftest download-links
+  (async done
+    (guard (p/let [l (files/link "/a b/r.txt" :expires 600 :max-downloads 2 :inline true)
+                   _ (is (= "http://x/files/link/t" (:url l)))
+                   _ (is (= [["GET" "/files/info" "path=%2Fa%20b%2Fr.txt"] ["POST" "/files/f9/links" nil]]
+                            (mapv (juxt :method :path :query) (take-last 2 @calls))))
+                   _ (is (= {:expires 600 :max_downloads 2 :inline true} (body-of (last-call))))
+                   _ (files/link "f9" :inline false)
+                   _ (is (= {:inline false} (body-of (last-call))) "only what is given")
+                   ls (files/links {:xid "f9"})
+                   _ (is (= [["l1" "u1"]] (mapv (juxt :xid :created-by) ls)))
+                   u1 (files/unlink {:xid "l1"})
+                   u2 (files/unlink "l1")
+                   _ (is (= [nil nil] [u1 u2]))
+                   _ (is (= [["DELETE" "/files/links/l1"] ["DELETE" "/files/links/l1"]] (mapv (juxt :method :path) (take-last 2 @calls))))
+                   e1 (refused (files/link "f8"))
+                   e2 (refused (files/link "f7" :expires 0))
+                   e3 (refused (files/unlink "l2"))
+                   _ (is (= [["LINKS_DISABLED" "iam"] ["INVALID_EXPIRES" "validation"] ["LINK_NOT_FOUND" "not_found"]]
+                            (mapv (juxt :code :category) [e1 e2 e3])))
+                   _ (files/folder "/s/" {:can-link true :cache 60})
+                   _ (is (= {:can_link true :cache 60} (body-of (last-call))))
+                   _ (files/folder "/s/" {:can_link nil})]
+             (is (= "{\"can_link\":null}" (:body (last-call))) "nil inherits")
+             (done)) done)))
+
+(deftest key-format-reaches-files
+  (async done
+    (guard (p/let [_ (files/info "f4")
+                   _ (is (= ["kebab" nil] ((juxt :key-format :query) (last-call))))
+                   _ (files/list nil :q "inv")
+                   _ (is (= ["kebab" "q=inv&folderless=true"] ((juxt :key-format :query) (last-call))))
+                   _ (set! core/*client* (assoc core/*client* :key-format "camel"))
+                   _ (files/links "f9")
+                   _ (is (= "camel" (:key-format (last-call))))
+                   _ (set! core/*client* (assoc core/*client* :key-format "snake"))
+                   _ (files/info "f4")
+                   _ (is (nil? (:key-format (last-call))))
+                   _ (set! core/*client* (assoc core/*client* :key-format nil))
+                   _ (files/info "f4")
+                   _ (is (nil? (:key-format (last-call))))
+                   _ (files/serve "f4" {:method "GET" :headers {}})]
+             (is (nil? (:key-format (last-call))) "serve passes bytes, no key format")
+             (done)) done)))
