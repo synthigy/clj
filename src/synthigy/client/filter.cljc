@@ -7,10 +7,10 @@
    Alias as `f` and place conditions in a where map keyed by field:
 
      (require '[synthigy.client.filter :as f])
-     (client/search c :user {:-where {:active (f/eq true)
-                                      :age    (f/gt 18)}} [:name])
-     (client/search c :user {:-where (f/or {:role (f/eq \"admin\")}
-                                           {:role (f/eq \"owner\")})} [:name])"
+     (client/search c :user {:active (f/eq true)
+                             :age    (f/gt 18)} [:name])
+     (client/search c :user (f/or {:role (f/eq \"admin\")}
+                                  {:role (f/eq \"owner\")}) [:name])"
   (:refer-clojure :exclude [and or not in]))
 
 (defn eq          [v] {:_eq v})

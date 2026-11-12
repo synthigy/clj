@@ -2,7 +2,7 @@
   "Live files suite: File Admin, File User and File Reader clients walk folders, sharing, bytes, versions, links and refusals.
 
   Run with `npm run test:files`; skips unless SYNTHIGY_FILES_TEST_ENDPOINT and the
-  SYNTHIGY_FILES_TEST_{ADMIN,USER,READER}_{ID,SECRET} client credentials are set."
+  SYNTHIGY_FILES_TEST_{ADMIN,USER,READER,BFF}_{ID,SECRET} client credentials are set (BFF: trusted, File Admin)."
   (:require
    [cljs.test :refer [deftest is async]]
    [promesa.core :as p]
@@ -42,6 +42,26 @@
 
 (defn refused [pr]
   (p/catch (p/then pr (fn [v] {:resolved v})) ex-data))
+
+(defn acting-step
+  "A trusted client acting as the user and the reader gets their access, not its own."
+  [bff admin F bin loose user-xid reader-xid]
+  (p/let [mine (as bff files/info (:xid loose))
+          _ (is (= (:xid loose) (:xid mine)) "as itself (File Admin) it sees the loose file")
+          hidden (as bff files/info (:xid loose) :acting-as reader-xid)
+          _ (is (nil? hidden))
+          got (p/then (as bff files/download (:xid bin) :acting-as reader-xid) bytes-of)
+          _ (is (= BIN got))
+          e (refused (as bff files/put (str (:path F) "bff-r-" run-id ".bin") (u8 BIN) :acting-as reader-xid))
+          _ (is (= ["FORBIDDEN" "iam"] ((juxt :code :category) e)))
+          own (as bff files/put (str (:path F) "bff-u-" run-id ".bin") (u8 BIN) :acting-as user-xid)
+          _ (is (= user-xid (get-in own [:uploaded-by :xid])))
+          _ (as bff files/delete (:xid own) :acting-as user-xid)
+          gone (as bff files/info (:xid own))
+          _ (is (nil? gone))
+          e (refused (as admin files/info (:xid bin) :acting-as reader-xid))
+          _ (is (= "NOT_TRUSTED" (:code e)))]
+    true))
 
 (defn delete-folder-xid! [xid]
   (let [[path query] (files/folder-at xid)] (files/send! :delete (files/endpoint-url path query) {})))
@@ -224,10 +244,10 @@
 
 (deftest files-live
   (if-not endpoint
-    (do (println "SKIP files-live: set SYNTHIGY_FILES_TEST_ENDPOINT and the ADMIN/USER/READER client ids and secrets")
+    (do (println "SKIP files-live: set SYNTHIGY_FILES_TEST_ENDPOINT and the ADMIN/USER/READER/BFF client ids and secrets")
         (is true))
     (async done
-      (let [admin (mk "ADMIN") user (mk "USER") reader (mk "READER")
+      (let [admin (mk "ADMIN") user (mk "USER") reader (mk "READER") bff (mk "BFF")
             st (atom {})
             sname (str "sub-" run-id)
             srenamed (str "sub2-" run-id)]
@@ -266,6 +286,9 @@
 
                     ;; 4. reader
                     _ (reader-step reader user F bin loose)
+
+                    ;; 4b. a trusted client acting as the user and the reader
+                    _ (acting-step bff admin F bin loose user-xid reader-xid)
 
                     ;; 5. links: File Admin makes F public
                     _ (links-step user admin F bin)

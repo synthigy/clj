@@ -1,8 +1,8 @@
 (ns synthigy.client.files-integration-test
   "synthigy.client.files against a live engine, as three identities: File Admin, File User and File Reader.
 
-   Env: SYNTHIGY_FILES_TEST_ENDPOINT and SYNTHIGY_FILES_TEST_{ADMIN,USER,READER}_{ID,SECRET},
-   client-credentials clients whose service users hold those roles. Skips when the endpoint is unset.
+   Env: SYNTHIGY_FILES_TEST_ENDPOINT and SYNTHIGY_FILES_TEST_{ADMIN,USER,READER,BFF}_{ID,SECRET},
+   client-credentials clients whose service users hold those roles (BFF: trusted, File Admin). Skips when the endpoint is unset.
 
    Run: clj -M:files-integration"
   (:require
@@ -77,6 +77,7 @@
           admin (identity-client "ADMIN")
           user (identity-client "USER")
           reader (identity-client "READER")
+          bff (identity-client "BFF")
           created (atom [])
           track! (fn [kind x] (swap! created conj [kind (:xid x)]) x)
           binary (ubytes 0x00 0x01 0x02 0x03 0x04 0x05 0xff 0x00 0xff)
@@ -167,6 +168,19 @@
                   (is (= ["FORBIDDEN" "iam"] ((juxt :code :category) (refused #(files/folder (str (:path top) "rsub-" run "/"))))))
                   (let [old (last (as user (files/versions bin)))]
                     (is (= ["FORBIDDEN" "iam"] ((juxt :code :category) (refused #(files/restore bin old))))))))
+
+              (testing "4b. a trusted client acting as the user and the reader"
+                (as bff
+                  (is (= (:xid loose) (:xid (files/info loose))) "as itself (File Admin) it sees the loose file")
+                  (is (nil? (files/info loose :acting-as reader-xid)))
+                  (is (same-bytes? binary (files/download bin :acting-as reader-xid)))
+                  (is (= ["FORBIDDEN" "iam"] ((juxt :code :category) (refused #(files/put (str (:path top) "bff-r-" run ".txt") "r" :acting-as reader-xid)))))
+                  (let [own (files/put (str (:path top) "bff-u-" run ".txt") "u" :acting-as user-xid)]
+                    (is (= user-xid (get-in own [:uploaded-by :xid])))
+                    (files/delete own :acting-as user-xid)
+                    (is (nil? (files/info own)))))
+                (as admin
+                  (is (= "NOT_TRUSTED" (:code (refused #(files/info bin :acting-as reader-xid)))))))
 
               (testing "5. links: File Admin makes F public, File User sets its cache"
                 (as user

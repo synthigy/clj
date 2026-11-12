@@ -10,12 +10,12 @@
 
 (deftest op-search-shape
   (testing "search carries entity (name-coerced), RAW args, normalized selections"
-    (let [op (core/op-search :music-album {:-where {:plays {:-gt 1000}}} [:title :plays])]
+    (let [op (core/op-search :music-album {:plays {:-gt 1000}} [:title :plays])]
       (is (= "search" (:op op)))
       (is (= "music-album" (:entity op)))
       ;; args pass through raw — the server normalizes top-level where keys
       ;; itself (dash-aware). See the KEY NORMALIZATION note in core.cljc.
-      (is (= {:-where {:plays {:-gt 1000}}} (:args op)))
+      (is (= {:plays {:-gt 1000}} (:args op)))
       (is (contains? op :selections))))
 
   (testing "write-op :data passes through RAW so opaque jsonb value keys survive"

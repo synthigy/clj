@@ -31,7 +31,8 @@
                        :query (not-empty (str/replace (str (.getRawQuery uri)) #"&?key_format=[a-z]+" ""))
                        :key-format (second (re-find #"key_format=([a-z]+)" (str (.getRawQuery uri))))
                        :type (.getFirst h "Content-Type") :if-match (.getFirst h "If-Match")
-                       :range (.getFirst h "Range") :auth (.getFirst h "Authorization")})
+                       :range (.getFirst h "Range") :auth (.getFirst h "Authorization")
+                       :acting-as (.getFirst h "X-Acting-As")})
     (cond
       (and (= path "/files") (= method "POST"))
       (reply-json ex 201 {:xid "f1" :name "a.txt" :size (alength body) :content_type "text/plain"
@@ -253,3 +254,36 @@
   (files/url "f4")
   (files/serve "f4" {:request-method :get :headers {}})
   (is (nil? (:key-format (last-call))) "serve passes bytes, no key format"))
+
+(defn every-files-call [& opts]
+  (let [calls [#(apply files/put "/docs/a.txt" "x" opts)
+               #(apply files/download "/r.txt" :version 7 opts)
+               #(apply files/zip :files ["f1"] opts)
+               #(apply files/info "f9" opts)
+               #(apply files/list "/Docs/" opts)
+               #(apply files/list :all opts)
+               #(apply files/search "q" opts)
+               #(apply files/delete "f1" opts)
+               #(apply files/move "f1" "/b/" opts)
+               #(apply files/folder "/a b/" {} opts)
+               #(apply files/share "/Docs/" :read {:users ["u2"]} opts)
+               #(apply files/unshare "/Docs/" :read {:users ["u2"]} opts)
+               #(apply files/access "/Docs/" opts)
+               #(apply files/versions "/r.txt" opts)
+               #(apply files/restore "/r.txt" 7 opts)
+               #(apply files/link "/r.txt" opts)
+               #(apply files/links "/r.txt" opts)
+               #(apply files/unlink "l1" opts)
+               #(with-open [_ ^java.io.Closeable (:body (apply files/serve "f1" {:headers {}} opts))])]]
+    (doseq [c calls] (try (c) (catch clojure.lang.ExceptionInfo _ nil)))
+    (count calls)))
+
+(deftest acting-as
+  (testing "every files call, and the path lookup before it, sends X-Acting-As"
+    (let [n (every-files-call :acting-as "u7")]
+      (is (<= n (count @calls)))
+      (doseq [c @calls] (is (= "u7" (:acting-as c)) (str (:method c) " " (:path c))))))
+  (testing "without :acting-as no header goes out"
+    (reset! calls [])
+    (every-files-call)
+    (doseq [c @calls] (is (nil? (:acting-as c)) (str (:method c) " " (:path c))))))

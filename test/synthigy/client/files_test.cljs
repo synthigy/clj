@@ -302,3 +302,37 @@
                    _ (files/serve "f4" {:method "GET" :headers {}})]
              (is (nil? (:key-format (last-call))) "serve passes bytes, no key format")
              (done)) done)))
+
+(defn every-files-call [& opts]
+  (let [calls [#(apply files/put "/docs/a.txt" "x" opts)
+               #(apply files/download "/r.txt" :version 7 opts)
+               #(apply files/zip :files ["f1"] opts)
+               #(apply files/info "f9" opts)
+               #(apply files/list "/Docs/" opts)
+               #(apply files/list :all opts)
+               #(apply files/search "q" opts)
+               #(apply files/delete "f1" opts)
+               #(apply files/move "f1" "/b/" opts)
+               #(apply files/folder "/a b/" {} opts)
+               #(apply files/share "/Docs/" :read {:users ["u2"]} opts)
+               #(apply files/unshare "/Docs/" :read {:users ["u2"]} opts)
+               #(apply files/access "/Docs/" opts)
+               #(apply files/versions "/r.txt" opts)
+               #(apply files/restore "/r.txt" 7 opts)
+               #(apply files/link "/r.txt" opts)
+               #(apply files/links "/r.txt" opts)
+               #(apply files/unlink "l1" opts)
+               #(apply files/serve "f1" {:headers {}} opts)]]
+    (p/let [_ (reduce (fn [pr c] (p/then pr (fn [_] (p/catch (c) (constantly nil))))) (p/resolved nil) calls)]
+      (count calls))))
+
+(deftest acting-as
+  (async done
+    (guard (p/let [n (every-files-call :acting-as "u7")
+                   _ (is (<= n (count @calls)))
+                   _ (doseq [c @calls] (is (= "u7" (header c "X-Acting-As")) (str (:method c) " " (:path c))))
+                   _ (reset! calls [])
+                   _ (every-files-call)]
+             (doseq [c @calls] (is (nil? (header c "X-Acting-As")) (str (:method c) " " (:path c))))
+             (done))
+           done)))

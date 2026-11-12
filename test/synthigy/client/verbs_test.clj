@@ -55,7 +55,7 @@
                ;; a deliberate divergence from the Go/JS/Py SDKs. (count nil)=0,
                ;; (seq nil)=nil, (map f nil)=() all work, so nil is idiomatic.
                ;; Pinned here so nobody "fixes" it to [].
-               #(is (nil? (client/search :user {:-where {:active {:-eq true}}} [:name]))))
+               #(is (nil? (client/search :user {:active {:-eq true}} [:name]))))
         op   (first (:operations body))]
     (is (= "search" (:op op)))
     (is (= "user" (:entity op)))
@@ -118,7 +118,7 @@
   (let [sbody (with-capture {:results [{:ok true :data {:roles true}}]}
                 #(client/slice :user {:xid "u"} [:roles]))
         pbody (with-capture {:results [{:ok true :data [{:xid "u"}]}]}
-                #(client/purge :user {:-where {:active {:-eq false}}} [:xid]))]
+                #(client/purge :user {:active {:-eq false}} [:xid]))]
     (is (= "slice" (:op (first (:operations sbody)))))
     (is (= "purge" (:op (first (:operations pbody)))))))
 

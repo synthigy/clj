@@ -366,9 +366,15 @@
 
 (defn- mux-ensure-listening! [mux]
   (when-not (:stop @mux)
-    (let [stop (sse/listen (fn [ev] (mux-dispatch mux ev))
-                           {:on-connect #(mux-flush! mux)})]
-      (swap! mux assoc :stop stop))))
+    (let [connected (p/deferred)
+          stop (sse/listen (fn [ev] (mux-dispatch mux ev))
+                           {:on-connect (fn []
+                                          (mux-flush! mux)
+                                          ;; queued after the flush's own microtask, so :flush-inflight is set
+                                          (js/queueMicrotask
+                                           #(p/handle (or (:flush-inflight @mux) (p/resolved nil))
+                                                      (fn [_ _] (p/resolve! connected true)))))})]
+      (swap! mux assoc :stop stop :connected connected))))
 
 (defn- mux-maybe-stop! [mux]
   (when (empty? (:watches @mux))
@@ -484,6 +490,9 @@
     (p/let [rows (run)]
       (reset! value rows)
       (let [id (mux-register! (interest-for rows) (fn [_ev] (poke!)))]
+        ;; writes between the snapshot and the subscription sent no event
+        (when-let [c (:connected @(:mux (core/the-client)))]
+          (p/then c (fn [ok] (when (and ok (not @closed?)) (poke!)))))
         (when track-rows
           (add-watch value ::track-rows
                      (fn [_ _ _ rows] (mux-set-interest! id (interest-for rows)))))
@@ -499,7 +508,7 @@
    ATOM holding the current result vector, kept fresh in the background —
    await it once, then deref/add-watch/close-watch! it like any atom.
 
-     (p/let [msgs (watch-query \"Chat Message\" {:-where {...}} [:content])]
+     (p/let [msgs (watch-query \"Chat Message\" {...} [:content])]
        (add-watch msgs :ui (fn [_ _ old new] ...))
        (js/console.log @msgs))
 

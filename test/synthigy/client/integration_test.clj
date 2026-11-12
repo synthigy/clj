@@ -66,7 +66,7 @@
 
 (deftest search-with-kebab-args-test
   (let [results (client/search :user
-                  {:-where {:name {:-eq "Alice"}}}
+                  {:name {:-eq "Alice"}}
                   [:name :active])]
     (is (= 1 (count results)))
     (is (= "Alice" (:name (first results))))))
@@ -74,7 +74,7 @@
 
 (deftest search-with-relation-shorthand-test
   (let [results (client/search :user
-                  {:-where {:name {:-eq "Alice"}}}
+                  {:name {:-eq "Alice"}}
                   {:name nil :roles [:name :active]})]
     (is (= 1 (count results)))
     ;; wire spec: an EMPTY relation is omitted from the row, so nil is valid
@@ -84,7 +84,7 @@
 
 (deftest search-mixed-vector-selection-test
   (let [results (client/search :user
-                  {:-where {:name {:-eq "Alice"}}}
+                  {:name {:-eq "Alice"}}
                   {:name nil :roles [:name :active {:users [:name]}]})]
     (is (= 1 (count results)))
     (let [roles (:roles (first results))]
@@ -111,7 +111,7 @@
 ;; ── Batch ────────────────────────────────────────────────────────────────────
 
 (deftest batch-test
-  (let [ops [(core/op-search :user {:-where {:name {:-eq "Alice"}}} [:name])
+  (let [ops [(core/op-search :user {:name {:-eq "Alice"}} [:name])
              (core/op-search :user_role nil [:name :active])
              (core/op-search :dataset_version nil [:name :deployed-on])]
         [users roles versions] (core/results->data (client/batch ops) ops)]
@@ -141,7 +141,7 @@
 
 
 (deftest batch-all-ok-test
-  (let [ops [(core/op-search :user {:-where {:name {:-eq "Alice"}}} [:name])
+  (let [ops [(core/op-search :user {:name {:-eq "Alice"}} [:name])
              (core/op-search :user_role nil [:name])]
         [users roles] (core/results->data (client/batch ops) ops)]
     (is (core/all-ok? [users roles]))
@@ -197,7 +197,7 @@
   (let [tok (client/token)
         c2 (core/create-client {:endpoint endpoint :token tok :key-format "kebab"})
         results (binding [core/*client* c2]
-                  (client/search :user {:-where {:name {:-eq "Alice"}}} [:name]))]
+                  (client/search :user {:name {:-eq "Alice"}} [:name]))]
     (is (= 1 (count results)))
     (is (= "Alice" (:name (first results))))))
 
@@ -332,7 +332,7 @@
         (is (> (count @wq) n0)))
       (finally
         (client/close-watch! wq)
-        (client/purge :user {:-where {:name {:-eq probe}}} [:name])))))
+        (client/purge :user {:name {:-eq probe}} [:name])))))
 
 (deftest disconnect-destroys-watch-machinery-test
   ;; the server-restart idiom: disconnect! (called by connect! on the previous
@@ -394,8 +394,8 @@
       (finally
         ((:close wa))
         ((:close wb))
-        (client/purge :user {:-where {:xid {:-eq a-xid}}} [:xid])
-        (client/purge :user {:-where {:xid {:-eq b-xid}}} [:xid])))))
+        (client/purge :user {:xid {:-eq a-xid}} [:xid])
+        (client/purge :user {:xid {:-eq b-xid}} [:xid])))))
 
 ;; ── Instrumentation hooks ────────────────────────────────────────────────────
 

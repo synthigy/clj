@@ -26,7 +26,7 @@ side by side under `src/synthigy/client/`:
 From Clojars — `deps.edn`:
 
 ```clojure
-{:deps {com.synthigy/sdk {:mvn/version "0.2.4"}}}
+{:deps {com.synthigy/sdk {:mvn/version "0.3.0"}}}
 ```
 
 Leiningen:
@@ -133,7 +133,7 @@ machine; for a remote server, create the client in the console.)
 **4. Install the SDK:**
 
 ```clojure
-{:deps {com.synthigy/sdk {:mvn/version "0.2.4"}}}   ; deps.edn
+{:deps {com.synthigy/sdk {:mvn/version "0.3.0"}}}   ; deps.edn
 ```
 
 **5. Write a query** in `xsql/movies.xsql`:
@@ -673,6 +673,7 @@ SYNTHIGY_FILES_TEST_ENDPOINT=http://localhost:7887 \
 SYNTHIGY_FILES_TEST_ADMIN_ID=… SYNTHIGY_FILES_TEST_ADMIN_SECRET=… \
 SYNTHIGY_FILES_TEST_USER_ID=… SYNTHIGY_FILES_TEST_USER_SECRET=… \
 SYNTHIGY_FILES_TEST_READER_ID=… SYNTHIGY_FILES_TEST_READER_SECRET=… \
+SYNTHIGY_FILES_TEST_BFF_ID=… SYNTHIGY_FILES_TEST_BFF_SECRET=… \
   clj -M:files-integration
 
 # Live browser login, played headlessly (confidential client + password user)

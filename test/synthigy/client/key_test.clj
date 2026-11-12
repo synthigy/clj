@@ -20,28 +20,28 @@
     (is (= :_order_by (key/->snake_case :_order_by)))
     (is (= :__typename (key/->snake_case :__typename))))
   (testing "dash prefix → underscore"
-    (is (= :_where (key/->snake_case :-where)))
+    (is (= :_limit (key/->snake_case :-limit)))
     (is (= :_eq (key/->snake_case :-eq)))
     (is (= :_order_by (key/->snake_case :-order-by)))))
 
 
 (deftest normalize-keys-deep-test
   (testing "kebab args"
-    (is (= {:_where {:is_active {:_eq true}
-                     :first_name {:_eq "alice"}}
+    (is (= {:is_active {:_eq true}
+            :first_name {:_eq "alice"}
             :_order_by {:created_at :desc}
             :_limit 10}
            (key/normalize-keys-deep
-            {:-where {:is-active {:-eq true}
-                      :first-name {:-eq "alice"}}
+            {:is-active {:-eq true}
+             :first-name {:-eq "alice"}
              :-order-by {:created-at :desc}
              :-limit 10}))))
   (testing "with arrays"
-    (is (= {:_where {:_or [{:first_name {:_eq "alice"}}
-                           {:last_name {:_eq "smith"}}]}}
+    (is (= {:_or [{:first_name {:_eq "alice"}}
+                  {:last_name {:_eq "smith"}}]}
            (key/normalize-keys-deep
-            {:-where {:-or [{:first-name {:-eq "alice"}}
-                            {:last-name {:-eq "smith"}}]}}))))
+            {:-or [{:first-name {:-eq "alice"}}
+                   {:last-name {:-eq "smith"}}]}))))
   (testing "nil passthrough"
     (is (nil? (key/normalize-keys-deep nil))))
   (testing "scalar passthrough"

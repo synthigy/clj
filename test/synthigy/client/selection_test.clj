@@ -49,11 +49,11 @@
   (testing "map with :selections wraps in vector"
     (is (= {:name nil
             :roles [{:selections {:name nil}
-                     :args {:_where {:active {:_eq true}}}}]}
+                     :args {:active {:_eq true}}}]}
            (selection/normalize
             {:name nil
              :roles {:selections {:name nil}
-                     :args {:_where {:active {:_eq true}}}}})))))
+                     :args {:active {:_eq true}}}})))))
 
 
 (deftest normalize-mixed-vector-test
@@ -85,11 +85,11 @@
   (testing "already-internal format passes through untouched"
     (is (= {:name nil
             :roles [{:selections {:name nil}
-                     :args {:_where {:active {:_eq true}}}}]}
+                     :args {:active {:_eq true}}}]}
            (selection/normalize
             {:name nil
              :roles [{:selections {:name nil}
-                      :args {:_where {:active {:_eq true}}}}]}))))
+                      :args {:active {:_eq true}}}]}))))
   (testing "an explicit :_join passes through"
     (is (= {:roles [{:selections {:name nil} :args {:_join "inner"}}]}
            (selection/normalize
@@ -161,10 +161,10 @@
             {:user-name nil :user-roles {:role-name nil}}))))
   (testing "args inside relations get normalized"
     (is (= {:roles [{:selections {:name nil}
-                     :args {:_where {:is_active {:_eq true}}}}]}
+                     :args {:is_active {:_eq true}}}]}
            (selection/normalize
             {:roles {:selections {:name nil}
-                     :args {:-where {:is-active {:-eq true}}}}})))))
+                     :args {:is-active {:-eq true}}}})))))
 
 
 (deftest normalize-idempotent-test

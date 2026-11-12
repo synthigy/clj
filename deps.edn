@@ -57,6 +57,14 @@
    :exec-fn cognitect.test-runner.api/test
    :exec-args {:nses [synthigy.client.files-integration-test]}}
 
+  :watch-acting-integration
+  {:extra-paths ["test"]
+   :extra-deps {io.github.cognitect-labs/test-runner
+                {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+   :main-opts ["-m" "cognitect.test-runner" "-n" "synthigy.client.watch-acting-integration-test"]
+   :exec-fn cognitect.test-runner.api/test
+   :exec-args {:nses [synthigy.client.watch-acting-integration-test]}}
+
   :login-integration
   {:extra-paths ["test"]
    :extra-deps {io.github.cognitect-labs/test-runner

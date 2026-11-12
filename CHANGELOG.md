@@ -3,6 +3,20 @@
 All notable changes to `com.synthigy/sdk` (Clojars). Follows
 [semver](https://semver.org). Pre-1.0: breaking changes can land on minor bumps.
 
+## 0.3.0
+
+Needs engine v0.5.0 or later.
+
+### Added
+- **Acting as a user on files.** `:acting-as` on every `files` call, JVM and ClojureScript; sent as
+  `X-Acting-As`.
+  A trusted BFF works on files as the user, like `/data`.
+
+### Fixed
+- A write right after `watch-query` / `watch-xsql` (and generated `watch-<name>`)
+  opened could be missed when it landed before the engine held the subscription.
+  Once the subscription holds, the watch refetches once in the background (JVM
+  and ClojureScript).
 ## 0.2.4
 
 Needs an engine with `POST /files/zip` (after v0.4.1).

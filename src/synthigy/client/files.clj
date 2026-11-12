@@ -90,8 +90,9 @@
     (if (or (nil? kf) (= "snake" kf)) u (str u (if (str/includes? u "?") "&" "?") "key_format=" kf))))
 
 (defn send!
-  [method u opts]
-  (let [resp (http/authed method (cased u) opts)]
+  [method u {:keys [acting-as] :as opts}]
+  (let [resp (http/authed method (cased u) (cond-> (dissoc opts :acting-as)
+                                             acting-as (assoc-in [:headers "X-Acting-As"] acting-as)))]
     (if (or (<= 200 (:status resp) 299) (= 304 (:status resp)))
       resp
       (throw (refusal resp)))))
@@ -99,9 +100,10 @@
 (defn json-call
   ([method path] (json-call method path nil {}))
   ([method path payload] (json-call method path payload {}))
-  ([method path payload query]
+  ([method path payload query] (json-call method path payload query nil))
+  ([method path payload query acting-as]
    (let [{:keys [body]} (send! method (endpoint-url path query)
-                               (cond-> {}
+                               (cond-> {:acting-as acting-as}
                                  (some? payload) (assoc :body (json/write-str payload)
                                                         :headers {"Content-Type" "application/json"})))]
      (when-not (str/blank? body)
@@ -126,11 +128,12 @@
 
 (defn xid-at
   "The xid of file `ref`; a path costs one info call."
-  [ref]
-  (if-not (path? ref)
-    (xid-of ref)
-    (or (:xid (info ref))
-        (throw (err/ex-info (str "No such file: " ref) {:code "FILE_NOT_FOUND" :status 404})))))
+  ([ref] (xid-at ref nil))
+  ([ref acting-as]
+   (if-not (path? ref)
+     (xid-of ref)
+     (or (:xid (info ref :acting-as acting-as))
+         (throw (err/ex-info (str "No such file: " ref) {:code "FILE_NOT_FOUND" :status 404}))))))
 
 (defn version-id [v] (if (map? v) (:id v) v))
 
@@ -146,7 +149,7 @@
 
 (defn put
   "Store bytes: a path (/a/b/name, the folder must exist) creates or replaces that file, an xid or the file replaces it, {:name n} makes a new file in no folder. Options: :content-type :if-match (a hash, or the file)"
-  [target data & {:keys [content-type if-match]}]
+  [target data & {:keys [content-type if-match acting-as]}]
   (let [[body ctype] (body+type data content-type)
         expected (if (map? if-match) (:hash if-match) if-match)
         [method path query] (cond
@@ -160,6 +163,7 @@
                           {:code "UNSUPPORTED_MEDIA_TYPE"})))
     (-> (send! method (endpoint-url path query)
                {:body body
+                :acting-as acting-as
                 :timeout nil
                 :headers (cond-> {"Content-Type" ctype}
                            expected (assoc "If-Match" (str "\"" expected "\"")))})
@@ -169,13 +173,14 @@
 
 (defn download
   "The bytes of file `ref`, or nil while :if-none-match still matches. Options: :as (:bytes default, :text, :stream to close yourself) :range [start end] (inclusive, nil leaves a side open) :version :if-none-match"
-  [ref & {:keys [as range version if-none-match] :or {as :bytes}}]
+  [ref & {:keys [as range version if-none-match acting-as] :or {as :bytes}}]
   (let [[start end] range
         [path query] (if (some? version)
-                       [(str (seg (xid-at ref)) "/versions/" (enc (version-id version))) nil]
+                       [(str (seg (xid-at ref acting-as)) "/versions/" (enc (version-id version))) nil]
                        (file-at ref))
         resp (send! :get (endpoint-url path query)
                     (cond-> {:timeout nil
+                             :acting-as acting-as
                              :headers (cond-> {}
                                         range (assoc "Range" (str "bytes=" start "-" end))
                                         if-none-match (assoc "If-None-Match" (str "\"" if-none-match "\"")))}
@@ -185,18 +190,19 @@
 
 (defn zip
   "One zip of :files and of everything inside :folders (xids, paths or maps), read as you; what you cannot read is listed in its _skipped.txt. :as :bytes (default) or :stream to close yourself."
-  [& {:keys [files folders as] :or {as :bytes}}]
+  [& {:keys [files folders as acting-as] :or {as :bytes}}]
   (:body (send! :post (endpoint-url "/zip" nil)
                 {:timeout nil
+                 :acting-as acting-as
                  :headers {"Content-Type" "application/json"}
                  :body (json/write-str {:files (mapv file-ref files) :folders (mapv folder-ref folders)})
                  :as (if (= :stream as) :stream :bytes)})))
 
 (defn info
   "File `ref`, or nil when it is not there or you cannot see it."
-  [ref]
+  [ref & {:keys [acting-as]}]
   (try
-    (let [[path query] (file-at ref "/info")] (json-call :get path nil query))
+    (let [[path query] (file-at ref "/info")] (json-call :get path nil query acting-as))
     (catch clojure.lang.ExceptionInfo e
       (when-not (#{"FILE_NOT_FOUND" "FOLDER_NOT_FOUND"} (:code (ex-data e))) (throw e)))))
 
@@ -211,27 +217,27 @@
 (defn list
   "{:files :folders}: a folder's files and subfolders; nil is the files in no folder, :all (or no folder) every file you can see, newest first. Options: :q :limit :offset"
   ([] (list :all))
-  ([folder & {:keys [q limit offset]}]
+  ([folder & {:keys [q limit offset acting-as]}]
    (let [page {:q q :limit limit :offset offset}
-         files #(:files (json-call :get "" nil %))]
+         files #(:files (json-call :get "" nil % acting-as))]
      (case folder
        :all {:files (files page) :folders []}
        nil {:files (files (assoc page :folderless "true")) :folders []}
        (let [ref (folder-ref folder)
              fs (future (files (assoc page :folder ref)))
-             folders (:folders (json-call :get "/folders" nil {:parent ref}))]
+             folders (:folders (json-call :get "/folders" nil {:parent ref} acting-as))]
          {:files @fs :folders (filterv #(holds-words? q (:name %)) folders)})))))
 
 (defn search
   "Folders and files whose paths hold the words of `q` in order, shortest first: {:results :truncated}, each result with :type. Options: :folder :limit :offset"
-  [q & {:keys [folder limit offset]}]
-  (json-call :get "/search" nil {:q q :folder (some-> folder folder-ref) :limit limit :offset offset}))
+  [q & {:keys [folder limit offset acting-as]}]
+  (json-call :get "/search" nil {:q q :folder (some-> folder folder-ref) :limit limit :offset offset} acting-as))
 
 (defn delete
   "Delete a file, or an empty folder (a path ending in /, or the folder itself)."
-  [ref]
+  [ref & {:keys [acting-as]}]
   (let [[path query] (if (folder? ref) (folder-at ref) (file-at ref))]
-    (send! :delete (endpoint-url path query) {})
+    (send! :delete (endpoint-url path query) {:acting-as acting-as})
     nil))
 
 (defn url
@@ -262,47 +268,48 @@
 
 (defn move
   "Rename or move: a file goes to `to` (/a/new.png), or into a folder when `to` ends in / (the name stays); a folder's `to` is its new path."
-  [from to]
+  [from to & {:keys [acting-as]}]
   (let [body (move-body from to)
         [path query] (if (folder? from) (folder-at from) (file-at from))]
-    (json-call :patch path body query)))
+    (json-call :patch path body query acting-as)))
 
 (defn folder
   "The folder at `path`, made with every missing folder above it; `settings` {:public :cache :can-link} sets its own values (nil inherits)."
   ([path] (folder path {}))
-  ([path settings] (json-call :put "/folders" (set/rename-keys settings {:can-link :can_link}) {:path path})))
+  ([path settings & {:keys [acting-as]}]
+   (json-call :put "/folders" (set/rename-keys settings {:can-link :can_link}) {:path path} acting-as)))
 
 (defn grantees [{:keys [users groups]}]
   {:users (mapv xid-of users) :groups (mapv xid-of groups)})
 
 (defn share
   "Give {:users :groups} (xids or records) `access` (read, write or delete) on `folder`; writers of the folder may."
-  [folder access to]
+  [folder access to & {:keys [acting-as]}]
   (let [[path query] (folder-at folder "/share")]
-    (json-call :post path (assoc (grantees to) :access (name access)) query)
+    (json-call :post path (assoc (grantees to) :access (name access)) query acting-as)
     nil))
 
 (defn unshare
   "Take `access` on `folder` away from {:users :groups}."
-  [folder access from]
+  [folder access from & {:keys [acting-as]}]
   (let [[path query] (folder-at folder "/unshare")]
-    (json-call :post path (assoc (grantees from) :access (name access)) query)
+    (json-call :post path (assoc (grantees from) :access (name access)) query acting-as)
     nil))
 
 (defn access
   "Who holds read, write and delete on `folder`."
-  [folder]
-  (let [[path query] (folder-at folder "/access")] (json-call :get path nil query)))
+  [folder & {:keys [acting-as]}]
+  (let [[path query] (folder-at folder "/access")] (json-call :get path nil query acting-as)))
 
 (defn versions
   "The kept versions of file `ref` (the last ten), newest first."
-  [ref]
-  (:versions (json-call :get (str (seg (xid-at ref)) "/versions"))))
+  [ref & {:keys [acting-as]}]
+  (:versions (json-call :get (str (seg (xid-at ref acting-as)) "/versions") nil nil acting-as)))
 
 (defn restore
   "Make kept `version` (its :id, or the version) of file `ref` current again; no bytes are copied."
-  [ref version]
-  (json-call :post (str (seg (xid-at ref)) "/versions/" (enc (version-id version)) "/restore")))
+  [ref version & {:keys [acting-as]}]
+  (json-call :post (str (seg (xid-at ref acting-as)) "/versions/" (enc (version-id version)) "/restore") nil nil acting-as))
 
 (defn link-body [{:keys [expires max-downloads inline]}]
   (cond-> {}
@@ -312,18 +319,18 @@
 
 (defn link
   "A link that downloads file `ref` without signing in, where its folder allows links; its :url is shown only now. Options: :expires (seconds, default 3600, at most 7 days) :max-downloads :inline"
-  [ref & {:as opts}]
-  (json-call :post (str (seg (xid-at ref)) "/links") (link-body opts)))
+  [ref & {:keys [acting-as] :as opts}]
+  (json-call :post (str (seg (xid-at ref acting-as)) "/links") (link-body opts) nil acting-as))
 
 (defn links
   "The live links of file `ref` you can see: your own, or all of them for File Admin."
-  [ref]
-  (:links (json-call :get (str (seg (xid-at ref)) "/links"))))
+  [ref & {:keys [acting-as]}]
+  (:links (json-call :get (str (seg (xid-at ref acting-as)) "/links") nil nil acting-as)))
 
 (defn unlink
   "End `link` (the link or its xid) at once, on every engine."
-  [link]
-  (json-call :delete (str "/links" (seg link)))
+  [link & {:keys [acting-as]}]
+  (json-call :delete (str "/links" (seg link)) nil nil acting-as)
   nil)
 
 (def served-headers
@@ -332,13 +339,14 @@
 
 (defn serve
   "Ring: answer `request` with file `ref` as a ring response (body an InputStream); Range and If-None-Match pass through, a refusal is the engine's own answer. Option :inline"
-  [ref request & {:keys [inline]}]
+  [ref request & {:keys [inline acting-as]}]
   (let [[path query] (file-at ref)
         in (:headers request)
         resp (http/authed (if (= :head (:request-method request)) :head :get)
                           (endpoint-url path (cond-> query inline (assoc :disposition "inline")))
                           {:as :stream
-                           :headers (into {} (keep (fn [k] (when-let [v (get in k)] [k v]))) ["range" "if-none-match" "if-range"])})
+                           :headers (cond-> (into {} (keep (fn [k] (when-let [v (get in k)] [k v]))) ["range" "if-none-match" "if-range"])
+                                      acting-as (assoc "X-Acting-As" acting-as))})
         out (:headers resp)]
     {:status (:status resp)
      :headers (into {} (keep (fn [k] (when-let [v (get out k)] [k v]))) served-headers)

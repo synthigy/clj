@@ -8,7 +8,7 @@
                :client-secret \"secret\"})
 
     (search :user
-      {:-where {:active {:-eq true}}}
+      {:active {:-eq true}}
       {:name nil :roles [:name :active]})
 
     (sync :user {:name \"alice\" :active true})
@@ -523,8 +523,9 @@
 (defn- mux-ensure-listening! [mux]
   (locking mux
     (when-not (:fut @mux)
-      (let [stop? (atom false)]
-        (swap! mux assoc :stop stop? :error nil
+      (let [stop? (atom false)
+            connected (promise)]
+        (swap! mux assoc :stop stop? :error nil :connected connected
                :fut (future
                       (try
                         (listen (fn [ev] (mux-dispatch mux ev))
@@ -533,7 +534,8 @@
                                  ;; lost or replaced while disconnected — re-assert
                                  ;; the union on every (re)connect.
                                  :on-connect #(try (mux-flush! mux)
-                                                   (catch Throwable _))})
+                                                   (catch Throwable _)
+                                                   (finally (deliver connected true)))})
                         (catch Throwable e
                           ;; Orderly shutdown (stop flag / future-cancel
                           ;; interrupt) is not a death — stay quiet. A REAL
@@ -545,7 +547,8 @@
                               (println "synthigy.client watch listener DIED:"
                                        (ex-message e) (pr-str (ex-data e))))
                             (locking mux
-                              (swap! mux assoc :fut nil :error e)))))))))))
+                              (swap! mux assoc :fut nil :error e))))
+                        (finally (deliver connected false)))))))))
 
 (defn- mux-maybe-stop! [mux]
   (locking mux
@@ -720,7 +723,10 @@
                          (seq records)       (assoc :records (vec records))
                          (and track-rows (seq rows))
                          (update :records (fnil into []) (keep :xid rows))))
-        id    (mux-register! (interest-for @value) (fn [_ev] (poke!)))]
+        id    (mux-register! (interest-for @value) (fn [_ev] (poke!)))
+        _     (when-let [c (:connected @(:mux (core/the-client)))]
+                ;; writes between the snapshot and the subscription sent no event
+                (future (when (and @c (not @closed?)) (poke!))))]
     (when track-rows
       (add-watch value ::track-rows
                  (fn [_ _ _ rows] (mux-set-interest! id (interest-for rows)))))
@@ -736,7 +742,7 @@
    ATOM holding the current result vector, kept fresh in the background —
    deref it, `add-watch` it, `close-watch!` it.
 
-     (def msgs (watch-query \"Chat Message\" {:-where {...}} [:content]
+     (def msgs (watch-query \"Chat Message\" {...} [:content]
                             :acting-as user-xid))
      @msgs                                          ; current results
      (add-watch msgs :ui (fn [_ _ old new] ...))    ; react to changes

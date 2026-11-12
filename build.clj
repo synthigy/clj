@@ -4,7 +4,7 @@
     [deps-deploy.deps-deploy :as dd]))
 
 (def lib 'com.synthigy/sdk)
-(def version "0.2.4")
+(def version "0.3.0")
 (def class-dir "target/classes")
 (def jar-file (format "target/%s-%s.jar" (name lib) version))
 

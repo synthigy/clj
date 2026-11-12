@@ -21,13 +21,13 @@
 
 (println)
 (println "=== Search with kebab args ===")
-(let [users (client/search :user {:-where {:name {:-eq "Alice"}}} [:name :active])]
+(let [users (client/search :user {:name {:-eq "Alice"}} [:name :active])]
   (println "Alice:" (first users)))
 
 (println)
 (println "=== Selection shorthand with relations (LEFT default) ===")
 (let [users (client/search :user
-              {:-where {:name {:-eq "Alice"}}}
+              {:name {:-eq "Alice"}}
               {:name nil :roles [:name :active]})]
   (let [alice (first users)]
     ;; wire spec: an empty relation is omitted from the row
@@ -43,7 +43,7 @@
 
 (println)
 (println "=== Batch ===")
-(let [ops [(core/op-search :user {:-where {:name {:-eq "Alice"}}} [:name])
+(let [ops [(core/op-search :user {:name {:-eq "Alice"}} [:name])
            (core/op-search :user_role nil [:name])
            (core/op-search :dataset_version nil [:name :deployed-on])]
       [users roles versions] (core/results->data (client/batch ops) ops)]

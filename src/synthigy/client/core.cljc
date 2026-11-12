@@ -328,7 +328,7 @@
 ;; actually does:
 ;;   - where/args keys AND top-level data keys → the server's `normalize-name`
 ;;     resolves them to columns/operators (dash-aware: `release-on`→`release_on`,
-;;     `:-where`→`:_where`), so client normalization is redundant. Crucially it
+;;     `:-order-by`→`:_order_by`), so client normalization is redundant. Crucially it
 ;;     leaves opaque jsonb VALUES untouched — whereas a client-side deep
 ;;     normalize mangled their inner keys (`{:someKey 1}`→`{:some_key 1}`),
 ;;     silently corrupting stored JSON. Passing args/data through raw fixes that.
