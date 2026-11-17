@@ -1,6 +1,8 @@
 (ns synthigy.client.error-test
   (:require [babashka.http-client]
+            [babashka.json :as json]
             [clojure.test :refer [deftest is testing]]
+            [cognitect.transit :as transit]
             [synthigy.client :as client]
             [synthigy.client.auth :as auth]
             [synthigy.client.core :as core]
@@ -75,3 +77,77 @@
     (binding [core/*client* {:endpoint "http://stub"}]
       (is (= ["MISSING_ENTITIES" "validation"]
              ((juxt :code :category) (data-of #(client/watch-sql-template "SELECT 1" nil))))))))
+
+(def ruled {:rule "relation_data" :attribute "file" :doc "errors/relation_data"})
+
+(defn transit-str
+  [data]
+  (let [out (java.io.ByteArrayOutputStream.)]
+    (transit/write (transit/writer out :json) data)
+    (.toString out "UTF-8")))
+
+(deftest server-errors-keep-rule-attribute-doc
+  (let [error (merge {:code "BAD_DATA_SHAPE" :message "bad"} ruled)]
+    (testing "->result: the failed operation's error map is the ex-data"
+      (let [data (ex-data (core/->result {:ok false :error error} {:op "stack"}))]
+        (is (= ruled (select-keys data (keys ruled))))
+        (is (= "stack" (get-in data [:operation :op])))))
+    (testing "a failed operation through a verb"
+      (binding [core/*client* {:endpoint "http://stub" :key-format "kebab"}]
+        (with-redefs [http/request (constantly {:results [{:ok false :error error}]})]
+          (is (= ruled (select-keys (data-of #(client/stack :document {:file "f-1"})) (keys ruled)))))))
+    (testing "a refused request, transit and JSON"
+      (binding [core/*client* {:endpoint "http://stub" :token-fn (constantly "t")}]
+        (doseq [[ct body] [["application/transit+json" (transit-str {:error error})]
+                           ["application/json" (json/write-str {:error error})]]]
+          (with-redefs [babashka.http-client/post (constantly {:status 400 :headers {"content-type" ct} :body body})]
+            (let [data (data-of #(client/search :user nil [:name]))]
+              (is (= ruled (select-keys data (keys ruled))) ct)
+              (is (= ["BAD_DATA_SHAPE" 400 "bad"] ((juxt :code :status :message) data)) ct))))))
+    (testing "absent fields stay absent"
+      (binding [core/*client* {:endpoint "http://stub" :key-format "kebab"}]
+        (with-redefs [http/request (constantly {:results [{:ok false :error {:code "FK_VIOLATION" :message "x"}}]})]
+          (is (= {} (select-keys (data-of #(client/search :user nil [:name])) [:hint :rule :attribute :doc])))))
+      (binding [core/*client* {:endpoint "http://stub" :token-fn (constantly "t")}]
+        (with-redefs [babashka.http-client/post (constantly {:status 502 :headers {"content-type" "text/plain"} :body "Bad Gateway"})]
+          (let [e (try (client/search :user nil [:name]) nil (catch clojure.lang.ExceptionInfo e e))]
+            (is (= "Request failed: HTTP 502" (ex-message e)))
+            (is (= {:code "HTTP_ERROR" :status 502 :body "Bad Gateway"}
+                   (select-keys (ex-data e) [:code :status :body :rule :attribute :doc])))))))))
+
+(deftest onboard-keeps-both-error-shapes
+  (binding [core/*client* {:endpoint "http://stub" :token-fn (constantly "t")}]
+    (doseq [call [#(client/onboard "user-xid-1") #(client/onboard-complete "t")]]
+      (testing "a bare string code"
+        (with-redefs [babashka.http-client/post (constantly {:status 403 :headers {"content-type" "application/json"}
+                                                             :body (json/write-str {:error "provision_forbidden"})})]
+          (is (= {:code "PROVISION_FORBIDDEN" :status 403} (select-keys (data-of call) [:code :status])))))
+      (testing "the server's error map"
+        (with-redefs [babashka.http-client/post
+                      (constantly {:status 503 :headers {"content-type" "application/json"}
+                                   :body (json/write-str {:error (merge {:code "MODULE_NOT_LOADED"
+                                                                         :message "oauth is not loaded" :hint "h"}
+                                                                        ruled)})})]
+          (let [e (try (call) nil (catch clojure.lang.ExceptionInfo e e))]
+            (is (= "oauth is not loaded" (ex-message e)))
+            (is (= (merge {:code "MODULE_NOT_LOADED" :status 503 :hint "h"} ruled)
+                   (select-keys (ex-data e) [:code :status :hint :rule :attribute :doc])))))))))
+
+(deftest a-refused-event-stream-keeps-the-servers-error
+  (binding [core/*client* {:endpoint "http://stub" :token-fn (constantly "t")}]
+    (let [stream #(java.io.ByteArrayInputStream. (.getBytes ^String % "UTF-8"))
+          connect #(try (#'http/sse-connect nil) nil (catch clojure.lang.ExceptionInfo e e))]
+      (testing "the server's error map"
+        (with-redefs [babashka.http-client/get
+                      (constantly {:status 403 :headers {"content-type" "application/json"}
+                                   :body (stream (json/write-str {:error (merge {:code "FORBIDDEN" :message "no"} ruled)}))})]
+          (let [e (connect)]
+            (is (= "no" (ex-message e)))
+            (is (= (merge {:code "FORBIDDEN" :status 403} ruled)
+                   (select-keys (ex-data e) [:code :status :rule :attribute :doc]))))))
+      (testing "no error body"
+        (with-redefs [babashka.http-client/get
+                      (constantly {:status 502 :headers {"content-type" "text/plain"} :body (stream "Bad Gateway")})]
+          (let [e (connect)]
+            (is (= "SSE connect failed: HTTP 502" (ex-message e)))
+            (is (= {:code "HTTP_ERROR" :status 502} (select-keys (ex-data e) [:code :status])))))))))

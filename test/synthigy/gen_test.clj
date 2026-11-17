@@ -80,3 +80,22 @@
       (is (str/includes? (run endpoint) "stale"))
       (is (= "" (run "")))
       (finally (.stop server 0)))))
+
+(deftest a-watch-variant-lists-every-watch-query-option
+  (let [src (#'synthigy.gen/emit-fn {:name "listMovies" :op "search" :entity "Movie"
+                                     :source "Movie {title}" :params [] :watch true})]
+    (is (str/includes? src "(defn watch-list-movies"))
+    (is (str/includes? src ":debounce-ms :on-event)") "the docstring names :on-event, which the variant forwards")))
+
+(deftest a-describe-failure-names-the-position-hint-and-manual-section
+  (let [dir (doto (io/file (System/getProperty "java.io.tmpdir") (str "gen-describe-" (System/nanoTime))) .mkdirs)]
+    (spit (io/file dir "ops.xsql") "@search movies\nMovie { title }\n")
+    (with-redefs [synthigy.gen/pull-client (constantly {})
+                  synthigy.gen/describe! (fn [& _]
+                                           (throw (ex-info "bad token" {:code "XSQL_PARSE_ERROR" :category "validation"
+                                                                        :line 3 :col 5 :hint "close the brace"
+                                                                        :doc "errors/xsql_parse"})))]
+      (let [e (try (gen/load-ir {:dir (str dir) :endpoint "http://x:7887/"}) nil (catch Exception e e))]
+        (is (= (str "describe failed: XSQL_PARSE_ERROR: bad token\n  at line 3, col 5\n  hint: close the brace\n"
+                    "  docs: http://x:7887/docs/errors/xsql_parse")
+               (ex-message e)))))))

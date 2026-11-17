@@ -253,9 +253,9 @@
   (single-result (core/op-deploy export-contents) opts))
 
 (defn destroy
-  "Destroy a dataset (every version, table and row). Requires dataset:delete."
+  "Destroy a dataset (every version, table and row); resolves to true. Requires dataset:delete."
   [dataset-xid & {:as opts}]
-  (single-result (core/op-destroy dataset-xid) opts))
+  (p/then (single-result (core/op-destroy dataset-xid) opts) (constantly true)))
 
 (defn deployed-model
   "Fetch the raw ERD model as deployed. Requires dataset:load scope.
@@ -320,6 +320,15 @@
 ;; in-flight POST so the server always observes the union computed
 ;; CLOSEST to when its own POST actually fires.
 
+(defn ^:no-doc mux-dispatch
+  "Deliver `event` to every watch whose interest it concerns."
+  [mux event]
+  (doseq [{:keys [interest sink]} (vals (:watches @mux))]
+    (when (and sink (core/event-matches? interest event))
+      (try (sink event)
+           (catch :default e
+             (js/console.warn "synthigy.client watch sink threw:" (ex-message e)))))))
+
 (defn- mux-flush-now!
   "Recompute the union over all watchers and POST it as the full
    subscription set. Returns a Promise."
@@ -352,17 +361,12 @@
              next (-> (if prior (p/handle prior (fn [_ _] nil)) (p/resolved nil))
                       (p/then (fn [_] (mux-flush-now! mux))))]
          (swap! mux assoc :flush-inflight next)
-         (p/finally next
-                    (fn [_ _]
-                      (when (identical? next (:flush-inflight @mux))
-                        (swap! mux assoc :flush-inflight nil)))))))))
-
-(defn- mux-dispatch [mux event]
-  (doseq [{:keys [interest sink]} (vals (:watches @mux))]
-    (when (and sink (core/event-matches? interest event))
-      (try (sink event)
-           (catch :default e
-             (js/console.warn "synthigy.client watch sink threw:" (ex-message e)))))))
+         (-> next
+             (p/catch (fn [e] (mux-dispatch mux (core/rejected-event e))))
+             (p/finally
+              (fn [_ _]
+                (when (identical? next (:flush-inflight @mux))
+                  (swap! mux assoc :flush-inflight nil))))))))))
 
 (defn- mux-ensure-listening! [mux]
   (when-not (:stop @mux)
@@ -422,7 +426,8 @@
      :close        (fn [])         → deregister (stream stops when last closes)
 
    Events are notification-only — refetch via search/get/batch on receipt
-   (RLS-correct notify-then-refetch).
+   (RLS-correct notify-then-refetch). A subscribe the server refuses arrives
+   as {:type \"subscription/rejected\" :reason … :error <ex-info> :records []}.
 
      (def w (watch {:entities [\"user\"]} (fn [ev] (js/console.log ev))))
      ((:add w) [\"some-xid\"])
@@ -469,7 +474,7 @@
    the FIRST snapshot must be awaited before the atom is safe to read;
    every refetch AFTER that just resets! the atom in the background."
   [entity-name run {:keys [debounce-ms relations records entity-track
-                            track-rows interest-entities]
+                            track-rows interest-entities on-event]
                      :or {debounce-ms 80 entity-track true}}]
   (let [value (atom nil)
         gen   (atom 0)
@@ -477,8 +482,10 @@
         poke! (fn [] (debounced-refetch! gen debounce-ms
                        #(p/catch (p/then (run) (fn [rows] (when-not @closed? (reset! value rows))))
                                  (fn [e]
-                                   (js/console.warn "synthigy.client watch refetch failed:"
-                                                    (ex-message e))))))
+                                   (if on-event
+                                     (on-event (core/rejected-event e))
+                                     (js/console.warn "synthigy.client watch refetch failed:"
+                                                      (ex-message e)))))))
         base-entities (or interest-entities (when entity-track [entity-name]))
         interest-for (fn [rows]
                        (cond-> {}
@@ -489,7 +496,11 @@
                          (update :records (fnil into []) (keep :xid rows))))]
     (p/let [rows (run)]
       (reset! value rows)
-      (let [id (mux-register! (interest-for rows) (fn [_ev] (poke!)))]
+      (let [id (mux-register! (interest-for rows)
+                              (fn [ev]
+                                (if (= "subscription/rejected" (:type ev))
+                                  (when on-event (on-event ev))
+                                  (poke!))))]
         ;; writes between the snapshot and the subscription sent no event
         (when-let [c (:connected @(:mux (core/the-client)))]
           (p/then c (fn [ok] (when (and ok (not @closed?)) (poke!)))))
@@ -520,7 +531,8 @@
    stream — the multiplexer unions their interests.
 
    Options: same as the CLJ SDK's watch-query (:acting-as/:key-format,
-   :relations/:records, :entity-track, :track-rows, :debounce-ms)."
+   :relations/:records, :entity-track, :track-rows, :debounce-ms, and
+   :on-event for subscription/rejected events)."
   [entity args selection & {:as opts}]
   (let [search-opts (mapcat identity (select-keys opts [:acting-as :key-format]))
         run (fn [] (apply search entity args selection search-opts))]

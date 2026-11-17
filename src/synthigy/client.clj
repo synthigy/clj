@@ -345,9 +345,10 @@
   (single-result (core/op-deploy export-contents) opts))
 
 (defn destroy
-  "Destroy a dataset (every version, table and row). Requires dataset:delete."
+  "Destroy a dataset (every version, table and row); returns true. Requires dataset:delete."
   [dataset-xid & {:as opts}]
-  (single-result (core/op-destroy dataset-xid) opts))
+  (single-result (core/op-destroy dataset-xid) opts)
+  true)
 
 (defn deployed-model
   "Fetch the raw ERD model as deployed. Requires dataset:load scope."
@@ -534,6 +535,8 @@
                                  ;; lost or replaced while disconnected — re-assert
                                  ;; the union on every (re)connect.
                                  :on-connect #(try (mux-flush! mux)
+                                                   (catch clojure.lang.ExceptionInfo e
+                                                     (mux-dispatch mux (core/rejected-event e)))
                                                    (catch Throwable _)
                                                    (finally (deliver connected true)))})
                         (catch Throwable e
@@ -588,15 +591,6 @@
           (recur))))
     ch))
 
-(defn- mux-register! [interest sink]
-  (let [mux (:mux (core/the-client))
-        id  (str (gensym "w"))
-        ch  (spawn-watch-channel! sink)]
-    (swap! mux assoc-in [:watches id] {:interest interest :ch ch})
-    (mux-ensure-listening! mux)
-    (mux-flush! mux)
-    id))
-
 (defn- mux-unregister! [id]
   (let [mux (:mux (core/the-client))
         ch  (get-in @mux [:watches id :ch])]
@@ -606,6 +600,21 @@
     (when ch (a/close! ch))
     (mux-flush! mux)
     (mux-maybe-stop! mux)))
+
+(defn mux-register!
+  "Add a watcher to the client's multiplexer; a refused first subscribe takes it out again before throwing."
+  [interest sink]
+  (let [mux (:mux (core/the-client))
+        id  (str (gensym "w"))
+        ch  (spawn-watch-channel! sink)]
+    (swap! mux assoc-in [:watches id] {:interest interest :ch ch})
+    (mux-ensure-listening! mux)
+    (try
+      (mux-flush! mux)
+      (catch Throwable e
+        (try (mux-unregister! id) (catch Throwable _))
+        (throw e)))
+    id))
 
 (defn- mux-set-interest!
   "Re-point a live watcher's interest; a no-op once it is unregistered."
@@ -644,7 +653,9 @@
      :close        (fn [])         → deregister (stream stops when last closes)
 
    Events are notification-only — refetch via search/get/batch on receipt
-   (RLS-correct notify-then-refetch).
+   (RLS-correct notify-then-refetch). A re-subscribe the server refuses
+   after a reconnect arrives as {:type \"subscription/rejected\" :reason …
+   :error <ex-info> :records []}; a refused first subscribe throws.
 
    `on-event` runs on its OWN dedicated thread, decoupled via a
    sliding-buffered core.async channel — a slow or blocking callback
@@ -701,7 +712,7 @@
    coalesced notify-then-refetch (+ optional row tracking). `run` is a 0-arg
    refetch returning the current rows."
   [entity-name run {:keys [debounce-ms relations records entity-track
-                            track-rows interest-entities]
+                            track-rows interest-entities on-event]
                      :or {debounce-ms 80 entity-track true}}]
   (let [value (atom (run))
         gen   (atom 0)
@@ -712,9 +723,11 @@
                                  ;; a refetch in flight when the watch closed must not repaint it
                                  (when-not @closed? (reset! value rows)))
                                (catch Throwable e
-                                 (binding [*out* *err*]
-                                   (println "synthigy.client watch refetch failed:"
-                                            (ex-message e))))))))
+                                 (if on-event
+                                   (on-event (core/rejected-event e))
+                                   (binding [*out* *err*]
+                                     (println "synthigy.client watch refetch failed:"
+                                              (ex-message e)))))))))
         base-entities (or interest-entities (when entity-track [entity-name]))
         interest-for (fn [rows]
                        (cond-> {}
@@ -723,7 +736,11 @@
                          (seq records)       (assoc :records (vec records))
                          (and track-rows (seq rows))
                          (update :records (fnil into []) (keep :xid rows))))
-        id    (mux-register! (interest-for @value) (fn [_ev] (poke!)))
+        id    (mux-register! (interest-for @value)
+                             (fn [ev]
+                               (if (= "subscription/rejected" (:type ev))
+                                 (when on-event (on-event ev))
+                                 (poke!))))
         _     (when-let [c (:connected @(:mux (core/the-client)))]
                 ;; writes between the snapshot and the subscription sent no event
                 (future (when (and @c (not @closed?)) (poke!))))]
@@ -768,7 +785,11 @@
                                 refetch. With :entity-track false this makes
                                 edits/deletes of already-visible rows fire
                                 (their events carry only the row's own xid).
-     :debounce-ms             — coalesce window for bursts (default 80)"
+     :debounce-ms             — coalesce window for bursts (default 80)
+     :on-event                — called with {:type \"subscription/rejected\"
+                                :reason … :error <ex-info> :records []} when
+                                a refresh or a re-subscribe fails (without
+                                it, a failed refresh is only logged)"
   [entity args selection & {:as opts}]
   (let [search-opts (mapcat identity (select-keys opts [:acting-as :key-format]))
         run (fn [] (apply search entity args selection search-opts))]

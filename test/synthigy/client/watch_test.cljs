@@ -193,3 +193,63 @@
                          (is false (str "watch-query rejected: " (ex-message e)))
                          (restore!)
                          (done)))))))))
+
+(def refusal {:code "FORBIDDEN" :message "no" :hint "h" :rule "stamp" :doc "errors/stamp"})
+
+(defn assert-rejected [ev]
+  (is (= ["subscription/rejected" "no" []] ((juxt :type :reason :records) ev)))
+  (is (= (dissoc refusal :message) (select-keys (ex-data (:error ev)) [:code :hint :rule :doc]))))
+
+(deftest a-refused-subscribe-reaches-the-watch
+  (async done
+    (let [orig-listen sse/listen
+          orig-post http/post-json
+          got (atom nil)]
+      (set! sse/listen (stub-listen (fn [_on-event _opts])))
+      (set! http/post-json (fn [_url _body] (p/rejected (http/server-error refusal "POST" 403 nil))))
+      (set! core/*client* (fake-client))
+      (client/watch {:records ["r-1"]} #(reset! got %))
+      (js/setTimeout
+       (fn []
+         (assert-rejected @got)
+         (set! sse/listen orig-listen)
+         (set! http/post-json orig-post)
+         (set! core/*client* nil)
+         (done))
+       30))))
+
+(deftest a-refused-refresh-reaches-on-event
+  (async done
+    (let [orig-listen sse/listen
+          orig-post http/post-json
+          orig-search client/search
+          n (atom 0)
+          got (atom nil)
+          captured-on-event (atom nil)]
+      (set! sse/listen (stub-listen (fn [on-event _opts] (reset! captured-on-event on-event))))
+      (set! http/post-json (fn [_url _body] (p/resolved {})))
+      (set! client/search (fn [_entity _args _selection & _opts]
+                            (if (= 1 (swap! n inc))
+                              (p/resolved [{:xid "row-1"}])
+                              (p/rejected (http/server-error refusal "Request" 403 nil)))))
+      (set! core/*client* (fake-client))
+      (letfn [(restore! []
+                (set! sse/listen orig-listen)
+                (set! http/post-json orig-post)
+                (set! client/search orig-search)
+                (set! core/*client* nil))]
+        (-> (client/watch-query :thing nil [:xid] :debounce-ms 5 :on-event #(reset! got %))
+            (p/then
+             (fn [live]
+               (@captured-on-event {:type "entity/touched" :entity "thing"})
+               (js/setTimeout
+                (fn []
+                  (assert-rejected @got)
+                  (is (= [{:xid "row-1"}] @live) "a failed refresh keeps the last rows")
+                  (restore!)
+                  (done))
+                30)))
+            (p/catch (fn [e]
+                       (is false (str "watch-query rejected: " (ex-message e)))
+                       (restore!)
+                       (done))))))))

@@ -3,6 +3,44 @@
 All notable changes to `com.synthigy/sdk` (Clojars). Follows
 [semver](https://semver.org). Pre-1.0: breaking changes can land on minor bumps.
 
+## 0.4.0
+
+### Added
+- **Refused requests keep `:rule`, `:attribute` and `:doc` too.** A non-2xx answer
+  (from `/data`, `/compile`, `/schema`, `/lint`, the subscription set and status,
+  and on the JVM `/history`) puts the server's error map in `ex-data`, as a failed
+  operation already did: `:rule`, `:attribute`, `:doc` (read at `GET /docs/<doc>`),
+  `:hint` and the rest, beside `:code`, `:status` and `:body`. JVM and
+  ClojureScript.
+- **`subscription/rejected` watch events**, as in the other SDKs:
+  `{:type "subscription/rejected" :reason … :error <ex-info> :records []}`,
+  with `:code`, `:hint`, `:rule` and `:doc` in the ex-info's `ex-data`. A
+  subscribe the server refuses reaches every `watch` (JVM: a re-subscribe after
+  a reconnect; a refused first subscribe still throws from `watch`).
+  `watch-query`, `watch-xsql` and `watch-sql-template` take `:on-event` for
+  these and for a failed refresh, which is otherwise logged as before.
+
+### Fixed
+- `destroy` returns `true` (ClojureScript: resolves to `true`) once the operation
+  succeeds, also when the engine answers `nil`.
+- `onboard` / `onboard-complete` turned an engine error object (a router 404, a
+  500, a 503 `MODULE_NOT_LOADED`) into an upper-cased string code on the JVM and
+  a `TypeError` in ClojureScript; they throw the server's error map as
+  `ex-data`, like any refused request. Bare-string codes are unchanged.
+- The `NO_TOKEN` message offered `SYNTHIGY_CLIENT_ID` + `SYNTHIGY_CLIENT_SECRET`,
+  which the client never reads from the environment. It names what works:
+  `SYNTHIGY_TOKEN`, `synthigy exec`, or `:client-id` and `:client-secret` passed
+  to `create-client`.
+- A JVM `watch` whose first subscribe is refused no longer stays in the multiplexer, where
+  its interest stayed in every later subscription set and a reconnect's refusal still
+  reached its `on-event`.
+- SSE connect, JVM and ClojureScript, reads the engine's error from the response body: the
+  refusal carries its code, message, hint, rule and doc, and an engine `FORBIDDEN` ends the
+  stream instead of a retry.
+- The generated `watch-<name>` docstring lists `:on-event`, which the variant forwards.
+- Code generator describe failures show the engine's position, hint and manual section
+  (`docs: <endpoint>/docs/<doc>`), not only the message.
+
 ## 0.3.0
 
 Needs engine v0.5.0 or later.

@@ -48,6 +48,8 @@
       (= path "/files/f2") (json-resp 404 {:error {:code "FILE_NOT_FOUND" :message "No such file"}})
       (= path "/files/f2/info") (json-resp 404 {:error {:code "FILE_NOT_FOUND" :message "No such file"}})
       (= path "/files/f3/info") (json-resp 503 {:error {:code "AUDIT_UNAVAILABLE" :message "down"}})
+      (= path "/files/f6/info") (json-resp 403 {:error {:code "ATTRIBUTE_FORBIDDEN" :message "no" :rule "stamp"
+                                                        :attribute "modified_by" :doc "errors/stamp"}})
       (#{"/files/f1/versions" "/files/f9/versions"} path) (json-resp 200 {:xid "f1" :versions [{:id 7 :by "u1" :current true :content_type "a/b"}]})
       (str/ends-with? path "/restore") (json-resp 200 {:xid "f1"})
       (and (= path "/files/folders") (= method "GET")) (json-resp 200 {:parent "root" :folders [{:xid "d1" :name "Docs" :path "/Docs/"}]})
@@ -129,6 +131,13 @@
             e5 (refused (files/versions "zz"))]
       (is (= "FILES_UNAVAILABLE" (:code e5)))
       (done)) done)))
+
+(deftest refusal-keeps-rule-attribute-doc
+  (async done
+    (guard (p/let [e (refused (files/info "f6"))]
+             (is (= ["ATTRIBUTE_FORBIDDEN" 403 "stamp" "modified_by" "errors/stamp"]
+                    ((juxt :code :status :rule :attribute :doc) e)))
+             (done)) done)))
 
 (deftest zip
   (async done

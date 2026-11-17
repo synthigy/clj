@@ -169,6 +169,10 @@
     (is (= "dataset" (:entity op)))
     (is (= {:xid "ds-1"} (:data op)))))
 
+(deftest destroy-answers-true-on-nil-data
+  (with-capture {:results [{:ok true :data nil}]}
+    #(is (true? (client/destroy "ds-1")))))
+
 (deftest sync-and-stack-take-a-vector-in-one-operation
   (let [body (with-capture {:results [{:ok true :data {:count 2}}]}
                #(is (= {:count 2} (client/sync :movie [{:title "A"} {:title "B"}]))))

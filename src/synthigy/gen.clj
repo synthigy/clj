@@ -150,7 +150,7 @@
                       "  " (pr-str (str "Live " fname " — watch-query over the same op; returns the "
                                         "closeable atom (deref / add-watch / c/close-watch!). "
                                         "Accepts watch-query options (:acting-as :records "
-                                        ":entity-track :track-rows :debounce-ms)."))
+                                        ":entity-track :track-rows :debounce-ms :on-event)."))
                       "\n"
                       (if (every? :optional params)
                         (str "  ([] (watch-" fname " {}))\n"
@@ -356,6 +356,16 @@
     (spit f (str (json/generate-string ir {:pretty schema-pretty}) "\n"))
     ir))
 
+(defn describe-failure
+  "A failed describe as the codegen prints it: code, message, position, hint and manual section."
+  [endpoint e]
+  (let [{:keys [code line col hint doc]} (ex-data e)]
+    (str/join "\n"
+              (cond-> [(str "describe failed: " (when code (str code ": ")) (ex-message e))]
+                line (conj (str "  at line " line (when col (str ", col " col))))
+                hint (conj (str "  hint: " hint))
+                doc  (conj (str "  docs: " (str/replace (str endpoint) #"/+$" "") "/docs/" doc))))))
+
 (defn load-ir
   "IR operations for `dir`: the saved `ops.ir.json` while it matches the
    sources (offline), else a live describe that refreshes it. Never returns a
@@ -373,11 +383,11 @@
                                       (describe! dir src)))
            :pulled?    true}
           (catch Exception e
-            (throw (ex-info (str "describe failed: " (ex-message e)
+            (throw (ex-info (str (describe-failure (or (:endpoint opts) (System/getenv "SYNTHIGY_ENDPOINT")) e)
                                  (cond
                                    (= "validation" (:category (ex-data e))) ""
-                                   edited? " — the .xsql changed since the last pull; run under `synthigy exec` or revert the edit"
-                                   :else " — run under `synthigy exec` (endpoint + credentials)"))
+                                   edited? "\n  the .xsql changed since the last pull: run under `synthigy exec` or revert the edit"
+                                   :else "\n  run under `synthigy exec` (endpoint + credentials)"))
                             {:dir dir :cause (ex-message e) :cause-data (ex-data e)}))))))))
 
 (defn instant [s]

@@ -26,7 +26,7 @@ side by side under `src/synthigy/client/`:
 From Clojars — `deps.edn`:
 
 ```clojure
-{:deps {com.synthigy/sdk {:mvn/version "0.3.0"}}}
+{:deps {com.synthigy/sdk {:mvn/version "0.4.0"}}}
 ```
 
 Leiningen:
@@ -133,7 +133,7 @@ machine; for a remote server, create the client in the console.)
 **4. Install the SDK:**
 
 ```clojure
-{:deps {com.synthigy/sdk {:mvn/version "0.3.0"}}}   ; deps.edn
+{:deps {com.synthigy/sdk {:mvn/version "0.4.0"}}}   ; deps.edn
 ```
 
 **5. Write a query** in `xsql/movies.xsql`:
@@ -552,6 +552,16 @@ Raw change events without a result set:
 
 Events are notification-only — watches refetch on receipt
 (notify-then-refetch keeps RLS correct).
+
+A subscribe the server refuses reaches every `watch` as
+`{:type "subscription/rejected" :reason … :error <ex-info> :records []}`
+(`(ex-data (:error ev))` holds `:code`, `:hint`, `:rule`, `:doc`); on the JVM a
+refused first subscribe throws from `watch` instead. Live results take
+`:on-event` for the same event, and for a refresh that fails:
+
+```clojure
+(movie/watch-list {:limit 5} :on-event (fn [ev] (prn (:reason ev))))
+```
 
 ### Raw stream + subscription set (advanced)
 

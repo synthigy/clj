@@ -278,7 +278,7 @@
    flag, no silent anonymous fallback."
   []
   (err/ex-info
-   (str "no Synthigy token: set SYNTHIGY_TOKEN, or SYNTHIGY_CLIENT_ID + "
-        "SYNTHIGY_CLIENT_SECRET, or run under `synthigy exec` (or a "
-        "Synthigy agent) so a parent can supply one.")
+   (str "no Synthigy token: set SYNTHIGY_TOKEN, run under `synthigy exec` "
+        "(or a Synthigy agent) so a parent can supply one, or pass "
+        ":client-id and :client-secret to create-client.")
    {:code "NO_TOKEN"}))

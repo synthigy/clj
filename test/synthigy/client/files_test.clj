@@ -69,6 +69,8 @@
       (= path "/files/f2") (reply-json ex 404 {:error {:code "FILE_NOT_FOUND" :message "No such file"}})
       (= path "/files/f2/info") (reply-json ex 404 {:error {:code "FILE_NOT_FOUND" :message "No such file"}})
       (= path "/files/f3/info") (reply-json ex 503 {:error {:code "AUDIT_UNAVAILABLE" :message "down"}})
+      (= path "/files/f6/info") (reply-json ex 403 {:error {:code "ATTRIBUTE_FORBIDDEN" :message "no" :rule "stamp"
+                                                            :attribute "modified_by" :doc "errors/stamp"}})
       (#{"/files/f1/versions" "/files/f9/versions"} path) (reply-json ex 200 {:xid "f1" :versions [{:id 7 :by "u1" :current true :content_type "a/b"}]})
       (str/ends-with? path "/restore") (reply-json ex 200 {:xid "f1"})
       (and (= path "/files/folders") (= method "GET")) (reply-json ex 200 {:parent "root" :folders [{:xid "d1" :name "Docs" :path "/Docs/"}]})
@@ -122,6 +124,10 @@
   (is (= ["AUDIT_UNAVAILABLE" "not_found" false] ((juxt :code :category :retryable) (code-of #(files/info "f3")))))
   (is (= "FILE_NOT_FOUND" (:code (code-of #(files/download "f2")))) "a JSON refusal on a byte download keeps its code")
   (is (= "FILES_UNAVAILABLE" (:code (code-of #(files/versions "zz"))))))
+
+(deftest refusal-keeps-rule-attribute-doc
+  (is (= ["ATTRIBUTE_FORBIDDEN" 403 "stamp" "modified_by" "errors/stamp"]
+         ((juxt :code :status :rule :attribute :doc) (code-of #(files/info "f6"))))))
 
 (deftest download
   (is (= "0123456789" (String. ^bytes (files/download "f1"))))

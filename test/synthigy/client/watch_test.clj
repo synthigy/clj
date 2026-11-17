@@ -292,3 +292,60 @@
             (Thread/sleep 200)
             (is (= [{:xid "a"}] @v) "the closed atom keeps its last value")
             (is (empty? (:watches @(:mux fake))) "no ghost entry")))))))
+
+(def refusal {:code "FORBIDDEN" :message "no" :hint "h" :rule "stamp" :doc "errors/stamp"})
+
+(defn assert-rejected [ev]
+  (is (= ["subscription/rejected" "no" []] ((juxt :type :reason :records) ev)))
+  (is (= (dissoc refusal :message) (select-keys (ex-data (:error ev)) [:code :hint :rule :doc]))))
+
+(defn fake-client []
+  {:endpoint "http://localhost:0/data"
+   :mux  (atom {:watches {}})
+   :subs (atom {:data {} :entities #{} :relations #{} :models #{}})})
+
+(deftest a-refused-re-subscribe-reaches-the-watch
+  (let [fake (fake-client)
+        reconnect (promise)
+        refuse? (atom false)
+        got (promise)]
+    (with-redefs [http/post-json (fn [& _] (when @refuse? (throw (http/server-error refusal "POST" 403 nil))))
+                  client/listen  (fn [_ {:keys [on-connect]}] @reconnect (reset! refuse? true) (on-connect))]
+      (binding [core/*client* fake]
+        (let [w (client/watch {:records ["r-1"]} #(deliver got %))]
+          (deliver reconnect true)
+          (assert-rejected (deref got 2000 :timeout))
+          (reset! refuse? false)
+          ((:close w)))))))
+
+(deftest a-refused-first-subscribe-leaves-no-watch-behind
+  (let [fake (fake-client)
+        refuse? (atom true)]
+    (with-redefs [http/post-json (fn [& _] (when @refuse? (throw (http/server-error refusal "POST" 403 nil))))
+                  client/listen  (fn [& _] nil)]
+      (binding [core/*client* fake]
+        (is (thrown? clojure.lang.ExceptionInfo (client/watch {:records ["r-1"]} (fn [_]))))
+        (is (empty? (:watches @(:mux fake))) "the refused watch is gone from the multiplexer")
+        (reset! refuse? false)
+        (let [w (client/watch {:records ["r-2"]} (fn [_]))
+              subscribed (set (mapcat :records (vals (:data @(:subs fake)))))]
+          (is (= #{"r-2"} subscribed) "a later subscription set no longer carries the refused interest")
+          ((:close w)))))))
+
+(deftest a-refused-refresh-reaches-on-event
+  (let [fake (fake-client)
+        got (promise)
+        calls (atom 0)
+        run (fn [] (if (= 1 (swap! calls inc))
+                     [{:xid "a"}]
+                     (throw (http/server-error refusal "Request" 403 nil))))]
+    (with-redefs [http/post-json (fn [& _] nil)
+                  client/listen  (fn [& _] nil)]
+      (binding [core/*client* fake]
+        (let [v (live-value* "thing" run {:records ["room"] :entity-track false :debounce-ms 1
+                                          :on-event #(deliver got %)})
+              ch (get-in @(:mux fake) [:watches (:watch-id (meta v)) :ch])]
+          (a/>!! ch {:type "record/update" :record-xid "room"})
+          (assert-rejected (deref got 2000 :timeout))
+          (is (= [{:xid "a"}] @v) "a failed refresh keeps the last rows")
+          (client/close-watch! v))))))

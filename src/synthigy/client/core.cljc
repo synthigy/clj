@@ -610,4 +610,9 @@
             (and model    (contains? want-mods model))))
       true)))
 
+(defn ^:no-doc rejected-event
+  "The subscription/rejected event a watch gets when its subscribe or refresh fails with `e`."
+  [e]
+  {:type "subscription/rejected" :reason (ex-message e) :error e :records []})
+
 

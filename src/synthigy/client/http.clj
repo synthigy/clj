@@ -156,17 +156,26 @@
     (catch Exception _ nil)))
 
 
-(defn- ensure-2xx
+(defn server-error
+  "An ex-info for a refused request: the server's error map as ex-data, beside :code, :status and :body."
+  [error context status body]
+  (err/ex-info (or (:message error)
+                   (str context " failed: HTTP " status))
+               (assoc error
+                      :code (or (:code error) "HTTP_ERROR")
+                      :status status
+                      :body body)))
+
+
+(defn ensure-2xx
+  "The parsed body of a 2xx response; any other status throws, the server's error map as ex-data."
   [{:keys [status body] :as resp} context]
   (let [ct (response-content-type resp)]
     (if (<= 200 status 299)
       (parse-body body ct)
       (let [parsed (parse-body body ct)]
-        (throw (err/ex-info (or (get-in parsed [:error :message])
-                            (str context " failed: HTTP " status))
-                        {:code (or (get-in parsed [:error :code]) "HTTP_ERROR")
-                         :status status
-                         :body (or parsed body)}))))))
+        (throw (server-error (when (map? (:error parsed)) (:error parsed))
+                             context status (or parsed body)))))))
 
 
 (defn request
@@ -197,22 +206,19 @@
     "POST"))
 
 
-(defn- ensure-2xx-onboard
-  "Like ensure-2xx, but /oauth/onboard and /oauth/onboard/complete's error
-   wire shape is {:error \"<code>\"} — a bare string, not the
-   {:error {:code :message}} /data envelope — so it needs its own mapping.
-   ensure-2xx's (get-in parsed [:error :code]) would silently return nil
-   against a string :error and fall through to a generic HTTP_ERROR, losing
-   the actual code. `label` names the failing call in the thrown message."
+(defn ensure-2xx-onboard
+  "Like ensure-2xx for /oauth/onboard[/complete], whose error is a bare string code unless the server sent its error map."
   [label {:keys [status body]}]
   (if (<= 200 status 299)
     (parse-json-body body)
     (let [parsed (parse-json-body body)
-          code (some-> parsed :error str/upper-case)]
-      (if code
-        (throw (err/ex-info (str label " failed: " code) {:code code :status status}))
-        (throw (err/ex-info (str label " request failed: HTTP " status)
-                        {:code "HTTP_ERROR" :status status :body body}))))))
+          error (:error parsed)]
+      (cond
+        (map? error) (throw (server-error error label status parsed))
+        (some? error) (let [code (str/upper-case error)]
+                        (throw (err/ex-info (str label " failed: " code) {:code code :status status})))
+        :else (throw (err/ex-info (str label " request failed: HTTP " status)
+                                  {:code "HTTP_ERROR" :status status :body body}))))))
 
 
 (defn onboard
@@ -250,10 +256,10 @@
   (let [url (str (base-url) "/data/events")
         headers (cond-> {"Accept" "text/event-stream"}
                   last-event-id (assoc "Last-Event-ID" last-event-id))
-        resp (authed :get url {:headers headers :as :stream})]
-    (when-not (<= 200 (:status resp) 299)
-      (throw (err/ex-info (str "SSE connect failed: HTTP " (:status resp))
-                      {:code "HTTP_ERROR" :status (:status resp)})))
+        resp (authed :get url {:headers headers :as :stream})
+        status (:status resp)]
+    (when-not (<= 200 status 299)
+      (ensure-2xx (update resp :body #(some-> % slurp)) "SSE connect"))
     (:body resp)))
 
 

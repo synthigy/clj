@@ -121,3 +121,80 @@
                (client/disconnect!)
                (done))
              80)))))))
+
+
+(def ruled {:rule "relation_data" :attribute "file" :doc "errors/relation_data"})
+
+(defn json-response [status data]
+  (js/Response. (js/JSON.stringify (clj->js data))
+                #js {:status status :headers #js {"Content-Type" "application/json"}}))
+
+(defn answering
+  [responses]
+  (let [fetch js/globalThis.fetch
+        client core/*client*
+        queue (atom responses)]
+    (set! js/globalThis.fetch (fn [u _]
+                                (if (.endsWith u "/data")
+                                  (let [r (first @queue)] (swap! queue rest) (p/resolved r))
+                                  (p/resolved (json-response 200 {})))))
+    (set! core/*client* (core/create-client {:endpoint "http://stub" :token "tok"}))
+    (fn [] (set! js/globalThis.fetch fetch) (set! core/*client* client))))
+
+(defn refused [pr]
+  (p/catch (p/then pr (fn [v] {:resolved v})) ex-data))
+
+(deftest server-errors-keep-rule-attribute-doc
+  (async done
+    (let [error (merge {:code "BAD_DATA_SHAPE" :message "bad"} ruled)
+          restore (answering [(json-response 200 {:results [{:ok false :error error}]})
+                              (json-response 400 {:error error})
+                              (json-response 200 {:results [{:ok false :error {:code "FK_VIOLATION" :message "x"}}]})])]
+      (-> (p/let [per-op (refused (client/stack :document {:file "f-1"}))
+                  top (refused (client/search :user nil [:name]))
+                  bare (refused (client/search :user nil [:name]))]
+            (is (= ruled (select-keys per-op (keys ruled))))
+            (is (= ruled (select-keys top (keys ruled))))
+            (is (= ["BAD_DATA_SHAPE" 400 "bad"] ((juxt :code :status :message) top)))
+            (is (= {} (select-keys bare [:hint :rule :attribute :doc]))))
+          (p/catch (fn [e] (is (nil? e) (str "unexpected: " (ex-message e)))))
+          (p/finally (fn [_ _] (restore) (done)))))))
+
+(deftest destroy-resolves-true-on-nil-data
+  (async done
+    (let [restore (answering [(json-response 200 {:results [{:ok true :data nil}]})])]
+      (-> (p/let [r (client/destroy "ds-1")]
+            (is (true? r)))
+          (p/catch (fn [e] (is (nil? e) (str "unexpected: " (ex-message e)))))
+          (p/finally (fn [_ _] (restore) (done)))))))
+
+(defn answering-paths
+  [routes]
+  (let [fetch js/globalThis.fetch
+        client core/*client*
+        queues (atom routes)]
+    (set! js/globalThis.fetch
+          (fn [u _]
+            (if-let [k (some #(when (.endsWith u %) %) (keys @queues))]
+              (let [r (first (get @queues k))] (swap! queues update k rest) (p/resolved r))
+              (p/resolved (json-response 200 {})))))
+    (set! core/*client* (core/create-client {:endpoint "http://stub" :token "tok"}))
+    (fn [] (set! js/globalThis.fetch fetch) (set! core/*client* client))))
+
+(deftest onboard-keeps-both-error-shapes
+  (async done
+    (let [server {:error (merge {:code "MODULE_NOT_LOADED" :message "oauth is not loaded" :hint "h"} ruled)}
+          restore (answering-paths
+                   {"/oauth/onboard" [(json-response 403 {:error "provision_forbidden"}) (json-response 503 server)]
+                    "/oauth/onboard/complete" [(json-response 400 {:error "claim_invalid"}) (json-response 503 server)]})]
+      (-> (p/let [s1 (refused (client/onboard "user-xid-1"))
+                  m1 (refused (client/onboard "user-xid-1"))
+                  s2 (refused (client/onboard-complete "t"))
+                  m2 (refused (client/onboard-complete "t"))]
+            (is (= ["PROVISION_FORBIDDEN" 403] ((juxt :code :status) s1)))
+            (is (= ["CLAIM_INVALID" 400] ((juxt :code :status) s2)))
+            (doseq [m [m1 m2]]
+              (is (= (merge {:code "MODULE_NOT_LOADED" :status 503 :hint "h"} ruled)
+                     (select-keys m [:code :status :hint :rule :attribute :doc])))))
+          (p/catch (fn [e] (is (nil? e) (str "unexpected: " (ex-message e)))))
+          (p/finally (fn [_ _] (restore) (done)))))))
