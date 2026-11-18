@@ -199,13 +199,26 @@
    parsed response — temporal values come back as real js/Date."
   ([body] (request body nil))
   ([body timeout-ms]
-   (let [client (core/the-client)]
-     (p/let [resp (authed :post (str (:endpoint client) "/data")
-                          {:body (transit/write tw body)
-                           :headers {"Content-Type" "application/transit+json"
-                                     "Accept" "application/transit+json"}
-                           :timeout-ms (or timeout-ms (:request-timeout client))})]
-       (ensure-2xx resp "Request")))))
+   (let [client (core/the-client)
+         payload (transit/write tw body)
+         started (js/Date.now)
+         limit (or timeout-ms (:request-timeout client))
+         attempt (fn attempt [n]
+                   (p/let [resp (binding [core/*client* client]
+                                  (authed :post (str (:endpoint client) "/data")
+                                          {:body payload
+                                           :headers {"Content-Type" "application/transit+json"
+                                                     "Accept" "application/transit+json"}
+                                           :timeout-ms (when limit (max 1 (- limit (- (js/Date.now) started))))}))]
+                     (let [busy? (and (< n core/busy-attempts)
+                                      (= 503 (:status resp))
+                                      (= "SERVER_BUSY" (get-in (parse-body (:body-text resp) (:content-type resp))
+                                                               [:error :code])))
+                           wait (when busy? (core/busy-delay-ms (some-> (:headers resp) (.get "retry-after"))))]
+                       (if (and busy? (not (and limit (>= (+ (- (js/Date.now) started) wait) limit))))
+                         (p/then (p/delay wait) (fn [_] (attempt (inc n))))
+                         (ensure-2xx resp "Request")))))]
+     (attempt 1))))
 
 
 (defn get-json
@@ -270,8 +283,10 @@
 
 (defn flush-subs!
   "POST the connected client's local subscription mirror as the full
-   set (the /data/subscription/set endpoint is full-replace). Returns a
-   Promise."
-  []
-  (post-json (str (base-url) "/data/subscription/set")
-             (core/build-subscriptions-body @(:subs (core/the-client)))))
+   set (the /data/subscription/set endpoint is full-replace), to `stream`'s
+   set when given. Returns a Promise."
+  ([] (flush-subs! nil))
+  ([stream]
+   (post-json (str (base-url) "/data/subscription/set")
+              (cond-> (core/build-subscriptions-body @(:subs (core/the-client)))
+                stream (assoc :stream stream)))))

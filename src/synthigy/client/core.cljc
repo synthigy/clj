@@ -558,15 +558,18 @@
 (defn ^:no-doc mux-union
   "Union every live watcher's interest into one combined subscription set."
   [watches]
-  (reduce (fn [acc {:keys [interest]}]
-            (-> acc
-                (update :records into (:records interest))
-                (update :entities into (map name (:entities interest)))
-                (update :relations into (map name (:relations interest)))
-                (update :models into (map name (:models interest)))
+  (let [record-watches (filter #(seq (get-in % [:interest :records])) (vals watches))
+        all-ops? (some #(empty? (get-in % [:interest :operations])) record-watches)]
+    (reduce (fn [acc {:keys [interest]}]
+              (cond-> (-> acc
+                          (update :records into (:records interest))
+                          (update :entities into (map name (:entities interest)))
+                          (update :relations into (map name (:relations interest)))
+                          (update :models into (map name (:models interest))))
+                (and (seq (:records interest)) (not all-ops?))
                 (update :operations into (map name (:operations interest)))))
-          {:records #{} :entities #{} :relations #{} :models #{} :operations #{}}
-          (vals watches)))
+            {:records #{} :entities #{} :relations #{} :models #{} :operations #{}}
+            (vals watches))))
 
 (defn ^:no-doc event-matches?
   "Does `event` concern `interest`? Discriminates on the live /data/events
@@ -600,11 +603,14 @@
         want-recs (set (:records interest))
         want-ents (set (map name (:entities interest)))
         want-rels (set (map name (:relations interest)))
-        want-mods (set (map name (:models interest)))]
+        want-mods (set (map name (:models interest)))
+        want-ops  (set (map name (:operations interest)))
+        op-ok?    (or (empty? want-ops)
+                      (contains? want-ops (second (str/split (str (:type event)) #"/"))))]
     (if (or rec-xid rel-sub entity relation model)
       (boolean
-        (or (and rec-xid  (contains? want-recs rec-xid))
-            (and rel-sub  (contains? want-recs rel-sub))
+        (or (and rec-xid  op-ok? (contains? want-recs rec-xid))
+            (and rel-sub  op-ok? (contains? want-recs rel-sub))
             (and entity   (contains? want-ents entity))
             (and relation (contains? want-rels relation))
             (and model    (contains? want-mods model))))
@@ -615,4 +621,57 @@
   [e]
   {:type "subscription/rejected" :reason (ex-message e) :error e :records []})
 
+(defn ^:no-doc new-stream-id
+  "A fresh id for one event stream: the engine keeps that stream's subscription set apart."
+  []
+  (str/replace (str (random-uuid)) "-" ""))
 
+(defn ^:no-doc stream-gone?
+  [e]
+  (= "STREAM_NOT_FOUND" (:code (ex-data e))))
+
+(defn ^:no-doc fold-history
+  "Folds attribute-level /history rows into one record event per (record, op) after `from`, oldest first."
+  [rows records from]
+  (let [records (set records)
+        {:keys [order by-key]}
+        (reduce (fn [{:keys [by-key] :as acc} {:keys [ts op value] :as row}]
+                  (let [xid (:record-xid row)
+                        attr (:attribute-xid row)]
+                    (if (and xid (contains? records xid) (pos? (compare ts from)))
+                      (let [type (str "record/" (if (= "change" op) "update" op))
+                            k [xid type]
+                            fresh? (not (contains? by-key k))
+                            prior (or (clojure.core/get by-key k)
+                                      {:type type :record-xid xid :ts ts :txid (:txid row)
+                                       :actor (:actor row) :request (:request row) :scope (:scope row)
+                                       :after {} :from-backfill true})
+                            ev (cond-> prior
+                                 (and attr (not= "__delete__" attr)) (assoc-in [:after (keyword attr)] value)
+                                 (pos? (compare ts (:ts prior))) (assoc :ts ts))]
+                        (cond-> (assoc-in acc [:by-key k] ev)
+                          fresh? (update :order conj k)))
+                      acc)))
+                {:order [] :by-key {}}
+                rows)]
+    (->> order
+         (map by-key)
+         (sort-by :ts)
+         (mapv #(cond-> % (= "record/delete" (:type %)) (dissoc :after))))))
+
+
+
+
+(def busy-attempts 3)
+
+
+(def busy-max-seconds 10)
+
+
+(defn busy-delay-ms
+  "The wait before resending a SERVER_BUSY request: Retry-After seconds (1 when absent) with ±50% jitter."
+  [retry-after]
+  (let [s #?(:clj (try (Long/parseLong (str/trim (str retry-after))) (catch Exception _ 0))
+             :cljs (js/parseInt retry-after 10))
+        base (* 1000 (if (and (number? s) (pos? s)) (min s busy-max-seconds) 1))]
+    (+ (/ base 2) (* (rand) base))))

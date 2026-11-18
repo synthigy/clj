@@ -65,6 +65,8 @@
   [operations opts]
   (let [body (core/build-request (core/the-client) operations opts)
         response (http/request body)]
+    (when (map? (:error response))
+      (throw (http/server-error (:error response) "/data" 200 response)))
     (:results response)))
 
 (defn- single-result
@@ -456,8 +458,9 @@
 
    UNAUTHORIZED/FORBIDDEN propagate; other transport errors reconnect.
 
-     (subscribe c :user)
-     (future (listen c prn))"
+   It yields only what the client's subscription set selects; declare that
+   interest with `watch`, which also re-sends the set after a reconnect. Most
+   callers want `watch` instead of this raw stream."
   ([on-event] (listen on-event nil))
   ([on-event opts] (http/sse-listen on-event (or opts {}))))
 
@@ -500,7 +503,8 @@
 
 (defn- mux-flush!
   "Recompute the union over all watchers and POST it as the full
-   subscription set (serialized so the latest union always lands last)."
+   subscription set of the open stream (serialized so the latest union always
+   lands last). No stream yet: nothing is sent, the next open posts it."
   [mux]
   (locking mux
     (let [{:keys [records entities relations models operations]}
@@ -513,7 +517,13 @@
                :entities (set entities)
                :relations (set relations)
                :models    (set models)})
-      (http/flush-subs!))))
+      (when-let [stream (:stream @mux)]
+        (try
+          (http/flush-subs! stream)
+          (catch clojure.lang.ExceptionInfo e
+            (if (core/stream-gone? e)
+              (swap! mux #(cond-> % (= stream (:stream %)) (assoc :stream nil)))
+              (throw e))))))))
 
 (defn- mux-dispatch [mux event]
   (doseq [{:keys [interest ch]} (vals (:watches @mux))]
@@ -521,24 +531,35 @@
       ;; Non-blocking — a full/slow watcher must never stall this loop.
       (a/put! ch event))))
 
+(defn mux-on-open
+  "Posts the union to a freshly opened `stream`; after the first open each one is a reconnect, so watches hear connection/resumed."
+  [mux connected opened? stream]
+  (let [resumed? @opened?]
+    (reset! opened? true)
+    (swap! mux assoc :stream stream)
+    (try (mux-flush! mux)
+         (catch clojure.lang.ExceptionInfo e
+           (if resumed?
+             (mux-dispatch mux (core/rejected-event e))
+             (do (deliver connected e)
+                 (swap! mux assoc :connected (doto (promise) (deliver true))))))
+         (catch Throwable _)
+         (finally (deliver connected true)))
+    (when resumed?
+      (mux-dispatch mux {:type "connection/resumed" :gap [nil nil]}))))
+
 (defn- mux-ensure-listening! [mux]
   (locking mux
     (when-not (:fut @mux)
       (let [stop? (atom false)
+            opened? (atom false)
             connected (promise)]
-        (swap! mux assoc :stop stop? :error nil :connected connected
+        (swap! mux assoc :stop stop? :error nil :connected connected :stream nil
                :fut (future
                       (try
                         (listen (fn [ev] (mux-dispatch mux ev))
                                 {:stop? #(deref stop?)
-                                 ;; the server-side subscription set may have been
-                                 ;; lost or replaced while disconnected — re-assert
-                                 ;; the union on every (re)connect.
-                                 :on-connect #(try (mux-flush! mux)
-                                                   (catch clojure.lang.ExceptionInfo e
-                                                     (mux-dispatch mux (core/rejected-event e)))
-                                                   (catch Throwable _)
-                                                   (finally (deliver connected true)))})
+                                 :on-connect #(when-not @stop? (mux-on-open mux connected opened? %))})
                         (catch Throwable e
                           ;; Orderly shutdown (stop flag / future-cancel
                           ;; interrupt) is not a death — stay quiet. A REAL
@@ -550,7 +571,9 @@
                               (println "synthigy.client watch listener DIED:"
                                        (ex-message e) (pr-str (ex-data e))))
                             (locking mux
-                              (swap! mux assoc :fut nil :error e))))
+                              (swap! mux assoc :fut nil :error e :stream nil))
+                            (when (instance? clojure.lang.ExceptionInfo e)
+                              (mux-dispatch mux (core/rejected-event e)))))
                         (finally (deliver connected false)))))))))
 
 (defn- mux-maybe-stop! [mux]
@@ -558,7 +581,7 @@
     (when (empty? (:watches @mux))
       (when-let [s (:stop @mux)] (reset! s true))
       (when-let [f (:fut @mux)] (future-cancel f))
-      (swap! mux assoc :fut nil :stop nil))))
+      (swap! mux assoc :fut nil :stop nil :stream nil))))
 
 (def ^:private watch-buffer-size
   "Sliding-window size per watcher channel — bounds memory under a burst;
@@ -598,8 +621,18 @@
     ;; Closing ends the consumer thread's loop (a/<!! returns nil once the
     ;; channel is closed AND drained) — no thread leak on close.
     (when ch (a/close! ch))
-    (mux-flush! mux)
-    (mux-maybe-stop! mux)))
+    (mux-maybe-stop! mux)
+    (mux-flush! mux)))
+
+(defn mux-await-open
+  "Blocks until the stream's first open has posted the union; rethrows its refusal."
+  [mux]
+  (let [ms (or (:request-timeout (core/the-client)) 30000)
+        r (deref (:connected @mux) ms ::timeout)]
+    (cond
+      (= ::timeout r) (throw (err/ex-info (str "Event stream did not open within " ms " ms")
+                                          {:code "TRANSPORT_ERROR"}))
+      (instance? Throwable r) (throw r))))
 
 (defn mux-register!
   "Add a watcher to the client's multiplexer; a refused first subscribe takes it out again before throwing."
@@ -610,7 +643,9 @@
     (swap! mux assoc-in [:watches id] {:interest interest :ch ch})
     (mux-ensure-listening! mux)
     (try
-      (mux-flush! mux)
+      (if (:stream @mux)
+        (mux-flush! mux)
+        (mux-await-open mux))
       (catch Throwable e
         (try (mux-unregister! id) (catch Throwable _))
         (throw e)))
@@ -630,6 +665,63 @@
 ;; =======================================================================
 ;; Watch — ergonomic SSE subscription (TS-SDK parity: client.watch)
 ;; =======================================================================
+
+(defn backfill-events
+  "The record events `interest` missed since `from`, read from /history per record, 8 at a time until `closed?` turns true."
+  [interest from limit closed?]
+  (let [between [from (str (java.time.Instant/now))]
+        fetch #(future (try (history-events % :between between :track "entity" :limit limit)
+                            (catch Throwable _ nil)))
+        rows (reduce (fn [rows batch]
+                       (if @closed?
+                         (reduced rows)
+                         (into rows (mapcat deref) (mapv fetch batch))))
+                     []
+                     (partition-all 8 (:records interest)))]
+    (filterv #(core/event-matches? interest %)
+             (core/fold-history rows (:records interest) from))))
+
+(defn backfill-sink
+  "Wraps `sink` so a connection/resumed sentinel is preceded by the record events missed during the gap; events arriving meanwhile are held and follow it."
+  [interest-fn closed? limit sink]
+  (let [last-ts (atom nil)
+        held (atom nil)
+        deliver! (fn [ev]
+                   (when (and (string? (:ts ev)) (pos? (compare (:ts ev) @last-ts)))
+                     (reset! last-ts (:ts ev)))
+                   (when-not @closed?
+                     (try (sink ev)
+                          (catch Throwable e
+                            (binding [*out* *err*]
+                              (println "synthigy.client watch sink threw:" (ex-message e)))))))
+        replay? (fn [ev]
+                  (and (= "connection/resumed" (:type ev)) @last-ts (seq (:records (interest-fn)))))
+        next-held! (fn []
+                     (locking held
+                       (let [q @held]
+                         (if (or @closed? (empty? q))
+                           (reset! held nil)
+                           (do (reset! held (subvec q 1)) (first q))))))
+        replay! (fn [sentinel]
+                  (loop [sentinel sentinel]
+                    (doseq [missed (try (backfill-events (interest-fn) @last-ts limit closed?) (catch Throwable _ nil))
+                            :while (not @closed?)]
+                      (deliver! missed))
+                    (deliver! sentinel)
+                    (when-let [nxt (loop []
+                                     (when-let [ev (next-held!)]
+                                       (if (replay? ev) ev (do (deliver! ev) (recur)))))]
+                      (recur nxt))))]
+    (add-watch closed? ::drop-held (fn [_ _ _ c] (when c (locking held (when @held (reset! held []))))))
+    (fn [ev]
+      (when-not @closed?
+        (case (locking held
+                (cond @held (do (swap! held conj ev) :held)
+                      (replay? ev) (do (reset! held []) :replay)
+                      :else :deliver))
+          :held nil
+          :replay (future (replay! ev))
+          :deliver (deliver! ev))))))
 
 (defn watch
   "Open a live SSE subscription for `interest` and stream change events to
@@ -655,20 +747,31 @@
    Events are notification-only — refetch via search/get/batch on receipt
    (RLS-correct notify-then-refetch). A re-subscribe the server refuses
    after a reconnect arrives as {:type \"subscription/rejected\" :reason …
-   :error <ex-info> :records []}; a refused first subscribe throws.
+   :error <ex-info> :records []}; a refused first subscribe throws. A
+   watch that opens the event stream waits for it (at most :request-timeout).
 
    `on-event` runs on its OWN dedicated thread, decoupled via a
    sliding-buffered core.async channel — a slow or blocking callback
    (I/O, a lock, a slow UI redraw) delays only ITS OWN delivery, never
    another watcher's, and never the shared SSE stream. Overflow (100
-   pending events) drops the oldest for that watcher only.
+   pending events) drops the oldest for that watcher only; a running
+   backfill replay holds live events in an unbounded queue instead.
+
+   Every reconnect after the first open arrives as {:type
+   \"connection/resumed\"}. With `:backfill true` the record events missed
+   during the gap come first, read from /history per watched record (at most
+   `:backfill-limit`, default 1000, each) and marked `:from-backfill true`;
+   live events arriving meanwhile are held, none dropped, and follow the
+   sentinel in arrival order. Closing the watch stops the replay.
 
      (def w (watch {:entities [\"user\"]} (fn [ev] (prn ev))))
      ((:add w) [\"some-xid\"])
      ((:close w))"
-  [interest on-event & {:as _opts}]
+  [interest on-event & {:keys [backfill backfill-limit] :or {backfill-limit 1000}}]
   (let [state (atom interest)
-        id    (mux-register! interest on-event)]
+        closed? (atom false)
+        sink  (if backfill (backfill-sink #(deref state) closed? backfill-limit on-event) on-event)
+        id    (mux-register! interest sink)]
     {:interest     (fn [] @state)
      :set-interest (fn [i] (reset! state i) (mux-set-interest! id i))
      :add          (fn [xids] (mux-set-interest! id
@@ -676,7 +779,7 @@
      :remove       (fn [xids] (let [s (set xids)]
                                 (mux-set-interest! id
                                   (swap! state update :records #(vec (remove s %))))))
-     :close        (fn [] (mux-unregister! id))}))
+     :close        (fn [] (reset! closed? true) (mux-unregister! id))}))
 
 (defn watch-schema
   "Stream model-deploy events over the shared multiplexer. Mirrors the TS

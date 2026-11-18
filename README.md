@@ -93,7 +93,7 @@ the raw wire keys, or `"camel"`.
 | *generated* (via `synthigy.gen`) | `(movie/list {...})`, `(movie/watch-list {...})`, `@batch` fns — from your `.xsql` | daily |
 | `synthigy.client.core` | `create-client`/`*client*` (binding), `op-*` builders for `batch`, `results->data`/`ok?`, `compose-tree` | data helpers |
 | `synthigy.client.files` | `upload` `download` `replace` `versions` `restore`, folders, sharing and download links over `/files` (JVM and CLJS) | as needed |
-| `synthigy.client.subscriptions` | raw server subscription set | advanced — prefer watch |
+| `synthigy.client.subscriptions` | `subscriptions`: the subscription set the engine holds for the watch stream | debugging |
 
 The SDK is designed to be used via the `:as synthigy` alias — some
 operations (`sync`, `get`, `compile`) shadow `clojure.core`, so avoid `:refer`.
@@ -518,7 +518,10 @@ one request and returns them keyed by name; a failed member is an
 
 The recommended live layer. All watches on a client share **one** SSE stream
 and **one** consolidated server-side subscription (their interests are
-unioned by an internal multiplexer, re-asserted on every reconnect).
+unioned by an internal multiplexer, re-asserted on every reconnect). Each
+connection gets a fresh stream id and the engine (0.5.4+) keeps that stream's
+subscription set apart, so two processes or tabs on one client id don't
+overwrite each other's watches; an older engine keeps one set per client.
 
 An op marked `@watch` in your `.xsql` generates a `watch-<name>` fn — a live,
 RLS-scoped result set as an **atom**:
@@ -556,23 +559,36 @@ Events are notification-only — watches refetch on receipt
 A subscribe the server refuses reaches every `watch` as
 `{:type "subscription/rejected" :reason … :error <ex-info> :records []}`
 (`(ex-data (:error ev))` holds `:code`, `:hint`, `:rule`, `:doc`); on the JVM a
-refused first subscribe throws from `watch` instead. Live results take
+refused first subscribe throws from `watch` instead (a JVM `watch` that opens
+the event stream waits for it, at most `:request-timeout`, since the set is
+posted for that stream). Live results take
 `:on-event` for the same event, and for a refresh that fails:
 
 ```clojure
 (movie/watch-list {:limit 5} :on-event (fn [ev] (prn (:reason ev))))
 ```
 
-### Raw stream + subscription set (advanced)
+### Reconnects and backfill
+
+Every reconnect after the first open reaches each watch as
+`{:type "connection/resumed"}`, and live results (`watch-query`, generated
+`watch-<name>`, `watch-sql-template`) re-run on it. A record watch can also
+replay what it missed during the gap from `/history`:
+
+```clojure
+(synthigy/watch {:records [xid]} on-event :backfill true)   ; :backfill-limit 1000
+```
+
+The missed record events (one per record and operation, asked per watched
+record, marked `:from-backfill true`) arrive before `connection/resumed`;
+live events that land meanwhile are held, none dropped, and follow it in order.
+
+### Raw stream (advanced)
 
 `synthigy.client/listen` streams `/data/events` yourself (blocks — wrap in
-`future`; auto-reconnects with `Last-Event-ID` + backoff). The raw
-subscription-set helpers live in **`synthigy.client.subscriptions`**
-(`subscribe`, `subscribe-entity`, `set-subscriptions`, ...).
-
-**Do not mix them with watches on the same client**: the server keeps ONE
-full-replace subscription set per client identity, so raw calls clobber the
-multiplexer's set (and vice versa) — live updates silently stop.
+`future`; auto-reconnects with `Last-Event-ID` + backoff). It yields only what
+a subscription set selects, so declare interest with `watch`.
+`(synthigy.client.subscriptions/subscriptions)` shows the set the engine holds.
 
 ### Watching a SQL template
 

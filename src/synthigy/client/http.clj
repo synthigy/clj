@@ -179,15 +179,26 @@
 
 
 (defn request
-  "POST to /data with the given body (transit). Returns the parsed response —
+  "POST to /data with the given body (transit), resending a SERVER_BUSY refusal. Returns the parsed response —
    temporal values come back as real java.util.Date."
   [body]
-  (ensure-2xx
-    (authed :post (str (base-url) "/data")
-            {:body (->transit body)
-             :headers {"Content-Type" "application/transit+json"
-                       "Accept" "application/transit+json"}})
-    "Request"))
+  (let [payload (->transit body)
+        started (System/currentTimeMillis)
+        limit (:request-timeout (core/the-client))]
+    (loop [attempt 1]
+      (let [resp (authed :post (str (base-url) "/data")
+                         (cond-> {:body payload
+                                  :headers {"Content-Type" "application/transit+json"
+                                            "Accept" "application/transit+json"}}
+                           limit (assoc :timeout (max 1 (- limit (- (System/currentTimeMillis) started))))))
+            busy? (and (< attempt core/busy-attempts)
+                       (= 503 (:status resp))
+                       (= "SERVER_BUSY" (get-in (parse-body (:body resp) (response-content-type resp)) [:error :code])))
+            wait (when busy? (core/busy-delay-ms (get-in resp [:headers "retry-after"])))]
+        (if (and busy? (not (and limit (>= (+ (- (System/currentTimeMillis) started) wait) limit))))
+          (do (Thread/sleep (long wait))
+              (recur (inc attempt)))
+          (ensure-2xx resp "Request"))))))
 
 
 (defn get-json
@@ -241,10 +252,12 @@
 
 (defn flush-subs!
   "POST the connected client's local subscription mirror as the full set
-   (the /data/subscription/set endpoint is full-replace)."
-  []
-  (post-json (str (base-url) "/data/subscription/set")
-             (core/build-subscriptions-body @(:subs (core/the-client)))))
+   (the /data/subscription/set endpoint is full-replace), to `stream`'s set when given."
+  ([] (flush-subs! nil))
+  ([stream]
+   (post-json (str (base-url) "/data/subscription/set")
+              (cond-> (core/build-subscriptions-body @(:subs (core/the-client)))
+                stream (assoc :stream stream)))))
 
 
 ;; ============================================================================
@@ -252,8 +265,8 @@
 ;; ============================================================================
 
 (defn- sse-connect
-  [last-event-id]
-  (let [url (str (base-url) "/data/events")
+  [last-event-id stream]
+  (let [url (str (base-url) "/data/events?stream=" stream)
         headers (cond-> {"Accept" "text/event-stream"}
                   last-event-id (assoc "Last-Event-ID" last-event-id))
         resp (authed :get url {:headers headers :as :stream})
@@ -318,10 +331,9 @@
    Options:
      :stop?           0-arg predicate — truthy stops the loop between frames
      :max-delay       cap for reconnect backoff in ms (default 30000)
-     :on-connect      0-arg fn called after every successful (re)connect —
-                      used to re-assert server-side state (e.g. re-POST the
-                      subscription set, which may have been lost/replaced
-                      while disconnected). Exceptions are swallowed.
+     :on-connect      fn [stream-id] called after every successful (re)connect
+                      with that connection's fresh stream id — POST the
+                      subscription set for it here. Exceptions are swallowed.
      :on-parse-error  fn [Throwable raw-payload] — called when a frame's
                       data fails JSON parsing. Default logs to *err*."
   [on-event {:keys [stop? max-delay on-connect on-parse-error]
@@ -333,12 +345,14 @@
       (when-not (stop?*)
         (let [next-delay
               (try
-                (with-open [rdr (io/reader (sse-connect @last-id))]
-                  (when on-connect (try (on-connect) (catch Exception _)))
-                  (read-sse-stream! rdr on-event on-parse-error stop?* last-id))
+                (let [stream (core/new-stream-id)]
+                  (with-open [rdr (io/reader (sse-connect @last-id stream))]
+                    (when on-connect (try (on-connect stream) (catch Exception _)))
+                    (read-sse-stream! rdr on-event on-parse-error stop?* last-id)))
                 1000
                 (catch clojure.lang.ExceptionInfo e
-                  (if (contains? #{"UNAUTHORIZED" "FORBIDDEN"} (:code (ex-data e)))
+                  (if (or (contains? #{"UNAUTHORIZED" "FORBIDDEN"} (:code (ex-data e)))
+                          (= 403 (:status (ex-data e))))
                     (throw e)
                     delay))
                 (catch Exception _

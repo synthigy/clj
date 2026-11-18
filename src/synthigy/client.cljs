@@ -40,6 +40,8 @@
   [operations opts]
   (let [body (core/build-request (core/the-client) operations opts)]
     (p/let [response (http/request body (:timeout-ms opts))]
+      (when (map? (:error response))
+        (throw (http/server-error (:error response) "/data" 200 response)))
       (:results response))))
 
 (defn- single-result
@@ -286,6 +288,9 @@
    Auto-reconnects with Last-Event-ID + exponential backoff. Does
    NOT block — runs on the microtask queue via fetch streaming.
 
+   It yields only what the client's subscription set selects; declare that
+   interest with `watch`, which also re-sends the set after a reconnect.
+
    Options:
      :max-delay       — reconnect backoff cap ms (default 30000)
      :on-parse-error  — (fn [error raw]) for malformed frames"
@@ -331,7 +336,8 @@
 
 (defn- mux-flush-now!
   "Recompute the union over all watchers and POST it as the full
-   subscription set. Returns a Promise."
+   subscription set of the open stream; without one nothing is sent (the next
+   open posts it). Returns a Promise."
   [mux]
   (let [{:keys [records entities relations models operations]}
         (core/mux-union (:watches @mux))]
@@ -343,7 +349,13 @@
              :entities (set entities)
              :relations (set relations)
              :models    (set models)})
-    (http/flush-subs!)))
+    (if-let [stream (:stream @mux)]
+      (p/catch (http/flush-subs! stream)
+               (fn [e]
+                 (if (core/stream-gone? e)
+                   (swap! mux #(cond-> % (= stream (:stream %)) (assoc :stream nil)))
+                   (throw e))))
+      (p/resolved nil))))
 
 (defn- mux-flush!
   "Schedule a flush, serialized after any flush already in flight — the
@@ -372,18 +384,26 @@
   (when-not (:stop @mux)
     (let [connected (p/deferred)
           stop (sse/listen (fn [ev] (mux-dispatch mux ev))
-                           {:on-connect (fn []
-                                          (mux-flush! mux)
-                                          ;; queued after the flush's own microtask, so :flush-inflight is set
-                                          (js/queueMicrotask
-                                           #(p/handle (or (:flush-inflight @mux) (p/resolved nil))
-                                                      (fn [_ _] (p/resolve! connected true)))))})]
+                           {:on-connect (fn [stream]
+                                          (let [resumed? (:opened? @mux)]
+                                            (swap! mux assoc :stream stream :opened? true)
+                                            (mux-flush! mux)
+                                            (when resumed?
+                                              (mux-dispatch mux {:type "connection/resumed" :gap [nil nil]}))
+                                            ;; queued after the flush's own microtask, so :flush-inflight is set
+                                            (js/queueMicrotask
+                                             #(p/handle (or (:flush-inflight @mux) (p/resolved nil))
+                                                        (fn [_ _] (p/resolve! connected true))))))
+                            :on-error (fn [e]
+                                        (swap! mux assoc :stop nil :stream nil :opened? false)
+                                        (p/resolve! connected false)
+                                        (mux-dispatch mux (core/rejected-event e)))})]
       (swap! mux assoc :stop stop :connected connected))))
 
 (defn- mux-maybe-stop! [mux]
   (when (empty? (:watches @mux))
     (when-let [stop (:stop @mux)] (stop))
-    (swap! mux assoc :stop nil)))
+    (swap! mux assoc :stop nil :stream nil :opened? false)))
 
 (defn- mux-register! [interest sink]
   (let [mux (:mux (core/the-client))
@@ -396,8 +416,8 @@
 (defn- mux-unregister! [id]
   (let [mux (:mux (core/the-client))]
     (swap! mux update :watches dissoc id)
-    (mux-flush! mux)
-    (mux-maybe-stop! mux)))
+    (mux-maybe-stop! mux)
+    (mux-flush! mux)))
 
 (defn- mux-set-interest!
   "Re-point a live watcher's interest; a no-op once it is unregistered."
@@ -406,6 +426,52 @@
     (when (get-in @mux [:watches id])
       (swap! mux assoc-in [:watches id :interest] interest)
       (mux-flush! mux))))
+
+(defn backfill-events
+  "Promise of the record events `interest` missed since `from`, read from /history 8 records at a time until `closed?` turns true."
+  [interest from limit closed?]
+  (let [between [from (.toISOString (js/Date.))]
+        fetch (fn [xid]
+                (-> (http/post-json (str (http/base-url) "/history")
+                                    {:op "events" :opts {:record-xid xid :between between :track "entity" :limit limit}})
+                    (p/then :result)
+                    (p/catch (fn [_] nil))))]
+    (p/let [rows (reduce (fn [acc chunk]
+                           (p/let [rows acc
+                                   pages (if @closed? [] (p/all (map fetch chunk)))]
+                             (into rows cat pages)))
+                         (p/resolved [])
+                         (partition-all 8 (:records interest)))]
+      (filterv #(core/event-matches? interest %)
+               (core/fold-history rows (:records interest) from)))))
+
+(defn backfill-sink
+  "Wraps `sink` so a connection/resumed sentinel is preceded by the record events missed during the gap; live events arriving meanwhile follow it."
+  [interest-fn closed? limit sink]
+  (let [last-ts (atom nil)
+        held (atom nil)]
+    (letfn [(deliver! [ev]
+              (when (and (string? (:ts ev)) (pos? (compare (:ts ev) @last-ts)))
+                (reset! last-ts (:ts ev)))
+              (when-not @closed?
+                (try (sink ev)
+                     (catch :default e
+                       (js/console.warn "synthigy.client watch sink threw:" (ex-message e))))))
+            (push [ev]
+              (let [interest (interest-fn)]
+                (cond
+                  @held (swap! held conj ev)
+                  (and (= "connection/resumed" (:type ev)) @last-ts (seq (:records interest)))
+                  (do (reset! held [])
+                      (-> (p/catch (backfill-events interest @last-ts limit closed?) (fn [_] nil))
+                          (p/then (fn [missed]
+                                    (run! deliver! missed)
+                                    (let [h @held]
+                                      (reset! held nil)
+                                      (deliver! ev)
+                                      (run! push h))))))
+                  :else (deliver! ev))))]
+      push)))
 
 (defn watch
   "Open a live SSE subscription for `interest` and stream change events to
@@ -429,12 +495,20 @@
    (RLS-correct notify-then-refetch). A subscribe the server refuses arrives
    as {:type \"subscription/rejected\" :reason … :error <ex-info> :records []}.
 
+   Every reconnect after the first open arrives as {:type
+   \"connection/resumed\"}. With `:backfill true` the record events missed
+   during the gap come first, read from /history per watched record (at most
+   `:backfill-limit`, default 1000, each) and marked `:from-backfill true`;
+   live events arriving meanwhile follow the sentinel.
+
      (def w (watch {:entities [\"user\"]} (fn [ev] (js/console.log ev))))
      ((:add w) [\"some-xid\"])
      ((:close w))"
-  [interest on-event & {:as _opts}]
+  [interest on-event & {:keys [backfill backfill-limit] :or {backfill-limit 1000}}]
   (let [state (atom interest)
-        id    (mux-register! interest on-event)]
+        closed? (atom false)
+        sink  (if backfill (backfill-sink #(deref state) closed? backfill-limit on-event) on-event)
+        id    (mux-register! interest sink)]
     {:interest     (fn [] @state)
      :set-interest (fn [i] (reset! state i) (mux-set-interest! id i))
      :add          (fn [xids] (mux-set-interest! id
@@ -442,7 +516,7 @@
      :remove       (fn [xids] (let [s (set xids)]
                                 (mux-set-interest! id
                                   (swap! state update :records #(vec (remove s %))))))
-     :close        (fn [] (mux-unregister! id))}))
+     :close        (fn [] (reset! closed? true) (mux-unregister! id))}))
 
 (defn watch-schema
   "Stream model-deploy events over the shared multiplexer. Mirrors the TS

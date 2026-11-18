@@ -3,6 +3,60 @@
 All notable changes to `com.synthigy/sdk` (Clojars). Follows
 [semver](https://semver.org). Pre-1.0: breaking changes can land on minor bumps.
 
+## 0.5.0
+
+### Breaking
+- **The raw subscription calls in `synthigy.client.subscriptions` are internal** (`^:no-doc`, gone from the
+  README): `subscribe`, `unsubscribe`, `subscribe-entity`, `unsubscribe-entity`, `subscribe-model`,
+  `set-subscriptions` and `clear-subscriptions`. Each replaced the client's whole subscription set behind the
+  watch multiplexer's back. Declare interest with `watch`; `subscriptions` still shows what the engine holds.
+- `listen`'s `:on-connect` gets the connection's stream id (it took no argument). JVM and ClojureScript.
+
+### Added
+- **Each event stream has its own subscription set** (engine 0.5.5+). Every connection gets a fresh stream id
+  (`/data/events?stream=…`) and each subscription POST names it, so two processes or tabs on one client id no
+  longer overwrite each other's watches. An older engine ignores the id and keeps one set per client. On the
+  JVM, a `watch` that opens the event stream waits for it (at most `:request-timeout`) so a refused first
+  subscribe still throws from `watch`. JVM and ClojureScript.
+- **`(watch interest on-event :backfill true)`** replays the record events missed during a reconnect from
+  `/history` (asked per watched record, at most `:backfill-limit` each, default 1000, marked
+  `:from-backfill true`), then delivers `connection/resumed`; live events that arrive meanwhile follow it,
+  also when the replay fails. JVM and ClojureScript.
+- **A busy engine is retried for you.** `SERVER_BUSY` (HTTP 503 from an overloaded engine) is resent up to
+  3 attempts in all, waiting `Retry-After` (at most 10 s) with ±50% jitter, never past the client's `:request-timeout`. The request never
+  ran, so this is safe for writes too. When all 3 are refused you get the error: category `rate_limit`, retryable.
+
+### Fixed
+- **Closing a `:backfill` watch during a replay stops its /history calls**: the replay checks for close between batches of 8, so a 1000-record watch closed during the first batch no longer fetches the rest. JVM and ClojureScript.
+- **A slow `:backfill` replay no longer drops live events** (JVM). The replay ran on the watch's consumer
+  thread, so past 100 live events the sliding buffer discarded the oldest. It now runs off that thread and
+  holds every live event in order until the backfill and `connection/resumed` are delivered; closing the
+  watch stops it. The ClojureScript replay already held them.
+- **Watches hear `connection/resumed` on every reconnect** (it was never sent). **Live results re-run on it**
+  (`watch-query`, `watch-sql-template`, generated `watch-<name>`), so a dropped connection no longer leaves them
+  stale until the next change. JVM and ClojureScript.
+- A subscription POST that answers `STREAM_NOT_FOUND` (the stream closed meanwhile) is not reported as
+  `subscription/rejected`, and only clears the stream id it was sent for, so it can't knock out a newer stream.
+  Closing the last watch closes the stream instead of posting an empty set.
+- **A busy resend gets only what is left of `:request-timeout`**, so the whole call stays within the client's timeout
+  instead of up to twice it. JVM and ClojureScript.
+- **A watch on every operation is no longer narrowed by another watch's op filter.** The shared subscription
+  sent the union of every watch's ops, so one watch filtered to `insert` stopped updates and deletes for watches
+  that wanted all of them. Any watch with records and no op filter now turns the filter off.
+- **JVM: any 403 on the event stream is final** and every watch gets `subscription/rejected`, as in ClojureScript.
+  ClojureScript: a busy resend always goes out as the client that sent the first attempt.
+- **45 engine error codes now carry their real category** instead of `internal`: bad shapes, `INVALID_*` and
+  missing arguments are `validation`; `REF_NOT_FOUND`, `UNKNOWN_ATTRIBUTE`, `UNKNOWN_ROLE` and `DOC_NOT_FOUND` are
+  `not_found`; `GUARD_VIOLATION`, `CONSTRAINT_VIOLATION`, `DEPENDENT_OBJECTS`, `HOOK_REFUSED`, `LOCKED` and
+  `SCHEMA_CONFLICT` are `conflict`; `DB_UNAVAILABLE` is `internal` and retryable. `DB_ERROR` stays unclassified
+  and not retryable; the engine's own `retryable` flag still wins.
+- CLJS: a refused event stream (`UNAUTHORIZED`, `FORBIDDEN`, any 403) no longer
+  stops `listen` without a word: the new `:on-error` option gets the error
+  (default: `console.error`), every watch gets `subscription/rejected` with it,
+  and the next watch opens a new stream.
+- A `/data` reply carrying a top-level `error` throws it with the server's
+  fields, JVM and CLJS (`batch` returned nil).
+
 ## 0.4.0
 
 ### Added

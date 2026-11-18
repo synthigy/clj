@@ -160,6 +160,94 @@
           (p/catch (fn [e] (is (nil? e) (str "unexpected: " (ex-message e)))))
           (p/finally (fn [_ _] (restore) (done)))))))
 
+(deftest a-busy-server-is-resent-then-a-retryable-rate-limit
+  (async done
+    (let [busy (fn [code] (json-response 503 {:error {:code code :message "busy" :retryable true}}))
+          saved core/busy-delay-ms
+          _ (set! core/busy-delay-ms (constantly 0))
+          restore (answering [(busy "SERVER_BUSY") (busy "SERVER_BUSY") (json-response 200 {:results [{:ok true :data []}]})
+                              (busy "SERVER_BUSY") (busy "SERVER_BUSY") (busy "SERVER_BUSY")
+                              (busy "MODULE_NOT_LOADED") (json-response 200 {:results [{:ok true :data []}]})])]
+      (-> (p/let [got-in (client/search :movie nil [:title])
+                  gave-up (refused (client/search :movie nil [:title]))
+                  other (refused (client/search :movie nil [:title]))
+                  after (client/search :movie nil [:title])]
+            (is (= [] got-in) "resent until it gets in")
+            (is (= {:code "SERVER_BUSY" :category "rate_limit" :retryable true :status 503}
+                   (select-keys gave-up [:code :category :retryable :status])) "three attempts, then the refusal")
+            (is (= "MODULE_NOT_LOADED" (:code other)) "other refusals go once")
+            (is (= [] after) "nothing extra was consumed"))
+          (p/catch (fn [e] (is (nil? e) (str "unexpected: " (ex-message e)))))
+          (p/finally (fn [_ _] (set! core/busy-delay-ms saved) (restore) (done)))))))
+
+(deftest a-busy-resend-goes-out-as-the-same-client
+  (async done
+    (let [fetch js/globalThis.fetch
+          root core/*client*
+          saved core/busy-delay-ms
+          seen (atom [])
+          replies (atom [(json-response 503 {:error {:code "SERVER_BUSY" :message "busy"}})
+                         (json-response 200 {:results [{:ok true :data []}]})])]
+      (set! core/busy-delay-ms (constantly 50))
+      (set! core/*client* (core/create-client {:endpoint "http://first" :token "first-token"}))
+      (set! js/globalThis.fetch
+            (fn [u opts]
+              (swap! seen conj [u (aget (.-headers opts) "Authorization")])
+              (let [r (first @replies)] (swap! replies rest) (p/resolved r))))
+      (js/setTimeout #(set! core/*client* (core/create-client {:endpoint "http://other" :token "other-token"})) 20)
+      (-> (client/search :movie nil [:title])
+          (p/then (fn [r]
+                    (is (= [] r))
+                    (is (= [["http://first/data" "Bearer first-token"] ["http://first/data" "Bearer first-token"]] @seen)
+                        "the resend went out as the client that sent the first attempt")))
+          (p/catch (fn [e] (is (nil? e) (str "unexpected: " (ex-message e)))))
+          (p/finally (fn [_ _] (set! js/globalThis.fetch fetch) (set! core/*client* root)
+                       (set! core/busy-delay-ms saved) (done)))))))
+
+(deftest the-request-timeout-bounds-the-busy-wait
+  (async done
+    (let [saved core/busy-delay-ms
+          _ (set! core/busy-delay-ms (constantly 60000))
+          restore (answering [(json-response 503 {:error {:code "SERVER_BUSY" :message "busy"}})
+                              (json-response 200 {:results [{:ok true :data []}]})])
+          client core/*client*]
+      (set! core/*client* (assoc client :request-timeout 200))
+      (-> (p/let [e (refused (client/search :movie nil [:title]))
+                  after (client/search :movie nil [:title])]
+            (is (= "SERVER_BUSY" (:code e)))
+            (is (= [] after) "only one attempt was spent"))
+          (p/catch (fn [e] (is (nil? e) (str "unexpected: " (ex-message e)))))
+          (p/finally (fn [_ _] (set! core/busy-delay-ms saved) (restore) (done)))))))
+
+(deftest a-busy-resend-gets-only-the-time-left
+  (async done
+    (let [fetch js/globalThis.fetch
+          root core/*client*
+          saved core/busy-delay-ms
+          calls (atom 0)
+          t0 (js/Date.now)]
+      (set! core/busy-delay-ms (constantly 200))
+      (set! core/*client* (core/create-client {:endpoint "http://stub" :token "tok" :request-timeout 400}))
+      (set! js/globalThis.fetch
+            (fn [_ opts]
+              (if (= 1 (swap! calls inc))
+                (p/resolved (json-response 503 {:error {:code "SERVER_BUSY" :message "busy"}}))
+                (js/Promise. (fn [_ reject]
+                               (.addEventListener (.-signal opts) "abort" #(reject (js/Error. "aborted"))))))))
+      (-> (p/let [e (refused (client/search :movie nil [:title]))]
+            (is (= 2 @calls))
+            (is (some? (:code e)))
+            (is (< (- (js/Date.now) t0) 550) "the resend was aborted when the client's timeout ran out"))
+          (p/catch (fn [e] (is (nil? e) (str "unexpected: " (ex-message e)))))
+          (p/finally (fn [_ _] (set! js/globalThis.fetch fetch) (set! core/*client* root)
+                       (set! core/busy-delay-ms saved) (done)))))))
+
+(deftest the-busy-wait-follows-retry-after
+  (dotimes [_ 200]
+    (is (<= 1000 (core/busy-delay-ms "2") 3000))
+    (is (<= 500 (core/busy-delay-ms nil) 1500))
+    (is (<= 5000 (core/busy-delay-ms "3600") 15000))))
+
 (deftest destroy-resolves-true-on-nil-data
   (async done
     (let [restore (answering [(json-response 200 {:results [{:ok true :data nil}]})])]
@@ -198,3 +286,18 @@
                      (select-keys m [:code :status :hint :rule :attribute :doc])))))
           (p/catch (fn [e] (is (nil? e) (str "unexpected: " (ex-message e)))))
           (p/finally (fn [_ _] (restore) (done)))))))
+
+(deftest a-top-level-error-on-a-200-rejects
+  (async done
+    (let [orig http/request]
+      (set! http/request (fn stub
+                           ([body] (stub body nil))
+                           ([_ _] (p/resolved {:error {:code "NO_OPERATIONS" :message "No operations provided"}}))))
+      (set! core/*client* (core/create-client {:endpoint "http://x" :token "t"}))
+      (-> (client/search :user nil [:name])
+          (p/then (fn [_] (is false "resolved")))
+          (p/catch (fn [e] (is (= ["NO_OPERATIONS" 200] ((juxt :code :status) (ex-data e))))))
+          (p/finally (fn [_ _]
+                       (set! http/request orig)
+                       (set! core/*client* nil)
+                       (done)))))))

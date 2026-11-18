@@ -10,6 +10,7 @@
   (:require
    [clojure.string :as str]
    [promesa.core :as p]
+   [synthigy.client.core :as core]
    [synthigy.client.http :as http]))
 
 
@@ -77,6 +78,13 @@
       (loop-read "" "message" [] nil))))
 
 
+(defn default-on-error [e]
+  (js/console.error "synthigy: event stream refused, not reconnecting:" (ex-message e)))
+
+(defn fatal? [e]
+  (let [{:keys [code status]} (ex-data e)]
+    (or (contains? #{"UNAUTHORIZED" "FORBIDDEN"} code) (= 403 status))))
+
 (defn listen
   "Stream SSE notifications from /data/events, calling `on-event` with
    each `{:type :entity :relations :xids}` notification.
@@ -88,28 +96,32 @@
      :max-delay       — cap for reconnect backoff ms (default 30000)
      :on-parse-error  — (fn [error raw]) for malformed frames
                         (default logs to console.warn)
-     :on-connect      — 0-arg fn called after every successful (re)connect —
-                        used to re-assert server-side state (e.g. re-POST the
-                        subscription set, which may have been lost/replaced
-                        while disconnected). Exceptions are swallowed.
+     :on-connect      — (fn [stream-id]) called after every successful
+                        (re)connect with that connection's fresh stream id —
+                        POST the subscription set for it here. Exceptions
+                        are swallowed.
+     :on-error        — (fn [error]) for a refusal that ends the listener
+                        (default logs to console.error)
 
-   UNAUTHORIZED / FORBIDDEN propagate (no reconnect); other transport
-   errors trigger reconnect with backoff."
+   UNAUTHORIZED, FORBIDDEN and any 403 end the listener (no reconnect);
+   other transport errors trigger reconnect with backoff."
   ([on-event] (listen on-event nil))
-  ([on-event {:keys [max-delay on-parse-error on-connect]
+  ([on-event {:keys [max-delay on-parse-error on-connect on-error]
                      :or {max-delay 30000
-                          on-parse-error default-on-parse-error}}]
+                          on-parse-error default-on-parse-error
+                          on-error default-on-error}}]
    (let [stopped? (atom false)
          last-id (atom nil)
          controller (atom nil)
-         url (str (http/base-url) "/data/events")]
+         url (str (http/base-url) "/data/events?stream=")]
      (letfn [(connect [delay]
                (when-not @stopped?
                  (let [ctrl (js/AbortController.)
                        _ (reset! controller ctrl)
+                       stream (core/new-stream-id)
                        hdrs (cond-> {}
                               @last-id (assoc "Last-Event-ID" @last-id))]
-                   (-> (http/authed :get url
+                   (-> (http/authed :get (str url stream)
                                     {:headers hdrs
                                      :stream? true
                                      :signal (.-signal ctrl)})
@@ -119,7 +131,7 @@
                             (if (<= 200 status 299)
                               (do
                                 (when on-connect
-                                  (try (on-connect) (catch :default _)))
+                                  (try (on-connect stream) (catch :default _)))
                                 (p/then (read-stream! (:stream resp) on-event
                                                       on-parse-error last-id stopped?)
                                         (fn [_]
@@ -131,9 +143,9 @@
                         (fn [e]
                           (cond
                             @stopped? nil
-                            (contains? #{"UNAUTHORIZED" "FORBIDDEN"}
-                                       (:code (ex-data e)))
-                            (throw e)
+                            (fatal? e)
+                            (do (reset! stopped? true)
+                                (on-error e))
                             :else
                             (reconnect delay))))))))
              (reconnect [delay]
