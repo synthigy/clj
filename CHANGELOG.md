@@ -3,6 +3,11 @@
 All notable changes to `com.synthigy/sdk` (Clojars). Follows
 [semver](https://semver.org). Pre-1.0: breaking changes can land on minor bumps.
 
+## 0.5.1
+
+### Added
+- **Record locks (engine 0.5.6+):** `claim`, `renew` and `release`, with `op-claim` / `op-renew` / `op-release`. `@claim` documents generate typed functions; `@release` documents are skipped with a pointer to the client method.
+
 ## 0.5.0
 
 ### Breaking

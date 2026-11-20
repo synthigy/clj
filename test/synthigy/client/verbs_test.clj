@@ -122,6 +122,24 @@
     (is (= "slice" (:op (first (:operations sbody)))))
     (is (= "purge" (:op (first (:operations pbody)))))))
 
+(deftest claim-renew-release-shapes
+  (let [cbody (with-capture {:results [{:ok true :data [{:xid "j-1"}]}]}
+                #(is (= [{:xid "j-1"}] (client/claim :job {:_limit 2} [:xid] :acting-as "u-1" :key-format :camel))))
+        rbody (with-capture {:results [{:ok true :data [{:xid "j-1"}]}]}
+                #(client/renew :job ["j-1" "j-2"] :acting-as "u-1"))
+        lbody (with-capture {:results [{:ok true :data 1}]}
+                #(is (= 1 (client/release :job ["j-1"] :acting-as "u-1"))))]
+    (is (= ["u-1" "camel"] [(:acting_as cbody) (:key_format cbody)]))
+    (is (= {:op "claim" :entity "job" :args {:_limit 2} :selections {:xid nil}} (first (:operations cbody))))
+    (is (= "u-1" (:acting_as rbody)))
+    (is (= {:op "claim" :entity "job" :args {:xid {:_in ["j-1" "j-2"]} :_limit 2} :selections {:xid nil}}
+           (first (:operations rbody))))
+    (is (= {:op "release" :entity "job" :data ["j-1"]} (first (:operations lbody))))
+    (is (nil? (with-capture {:results []} #(is (= [] (client/renew :job []))))) "no call for no xids")
+    (binding [core/*client* fake-client]
+      (with-redefs [http/request (fn [_] {:results [{:ok false :error {:code "RECORD_LOCKED" :message "held"}}]})]
+        (is (= "RECORD_LOCKED" (:code (ex-data (try (client/release :job ["j-1"]) (catch clojure.lang.ExceptionInfo e e))))))))))
+
 (deftest sql-template-shape
   (let [body (with-capture {:results [{:ok true :data [{:n 2}]}]}
                #(is (= [{:n 2}] (client/sql-template "SELECT count(*) AS n FROM {user}" nil))))

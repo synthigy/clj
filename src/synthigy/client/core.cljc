@@ -434,6 +434,24 @@
    :args args
    :selections (selection/normalize selection)})
 
+(defn op-claim
+  "Build a claim operation for batch use; args needs :_limit."
+  [entity args selection]
+  {:op "claim" :entity (name entity)
+   :args args
+   :selections (selection/normalize selection)})
+
+(defn op-renew
+  "Build the claim that extends the lease on held records; selection defaults to xid."
+  [entity xids selection]
+  (op-claim entity {:xid {:_in (vec xids)} :_limit (count xids)} (or selection [:xid])))
+
+(defn op-release
+  "Build a release operation for batch use: a vector of xids or a unique-key map."
+  [entity data]
+  {:op "release" :entity (name entity)
+   :data data})
+
 (defn op-sql-template
   "Build a SQL template operation (ERD-aware analytics) for batch use."
   [template params & {:keys [cached] :or {cached true}}]

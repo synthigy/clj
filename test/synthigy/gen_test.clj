@@ -99,3 +99,10 @@
         (is (= (str "describe failed: XSQL_PARSE_ERROR: bad token\n  at line 3, col 5\n  hint: close the brace\n"
                     "  docs: http://x:7887/docs/errors/xsql_parse")
                (ex-message e)))))))
+
+(deftest claim-generates-and-release-is-skipped
+  (let [{:keys [files skipped]} (gen/emit-files [{:name "grab" :op "claim" :entity "job" :source "@claim grab\njob (limit 1)\n  xid"}
+                                                 {:name "free" :op "release" :entity "job" :source "@release free\n?ids:job[]"}]
+                                                {})]
+    (is (= ["free"] (map :name skipped)))
+    (is (some #(str/includes? (:content %) "grab") (vals files)))))

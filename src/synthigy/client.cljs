@@ -88,6 +88,23 @@
   [entity args selection & {:as opts}]
   (single-result (core/op-purge entity args selection) opts))
 
+(defn claim
+  "Lock up to (:_limit args) free matching records to the caller. Returns a Promise of them."
+  [entity args selection & {:as opts}]
+  (single-result (core/op-claim entity args selection) opts))
+
+(defn renew
+  "Extend the lease on held records. Returns a Promise of the ones still held."
+  [entity xids & {:keys [selection] :as opts}]
+  (if (seq xids)
+    (single-result (core/op-renew entity xids selection) (dissoc opts :selection))
+    (p/resolved [])))
+
+(defn release
+  "Clear the caller's locks on records named by xids or a unique-key map. Returns a Promise of the count."
+  [entity data & {:as opts}]
+  (single-result (core/op-release entity data) opts))
+
 (defn sql-template
   "Execute an ERD-aware SQL template. Returns a Promise."
   [template params & {:keys [cached] :or {cached true} :as opts}]

@@ -30,7 +30,7 @@
    plain wire fallback — not generated. Must mirror `synthigy.xsql.program`'s
    `doc-verbs` (sdk/clj has no dependency on core/xsql, so it can't be
    imported — a verb added there must be added here too)."
-  #{"search" "get" "search-tree" "get-tree" "slice" "purge" "sql-template"})
+  #{"search" "get" "search-tree" "get-tree" "slice" "purge" "claim" "sql-template"})
 
 (def ^:private core-syms
   (set (map str (keys (ns-publics 'clojure.core)))))

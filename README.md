@@ -385,7 +385,8 @@ Every op returns the data or throws `ExceptionInfo`, and takes the kwargs
 | `delete` | Delete specific records |
 | `batch` | Several operations in one request |
 
-Also available: `slice`/`purge`, `search-tree`/`get-tree`,
+Also available: `slice`/`purge`, `claim`/`renew`/`release` (record locks: a
+lock guards only the row's own columns), `search-tree`/`get-tree`,
 `lint`/`compile`, `deployed-model`/`runtime-model`, `whoami` (who a call runs
 as — roles, superuser, whether this client may act as users), and the `history-*`
 temporal ops (`get-at`, `events`, `diff`, `timeline`, `since`) — see their
